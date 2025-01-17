@@ -1,4 +1,5 @@
 use crate::errors::BitcoinClientError;
+use crate::rpc_config::RpcConfig;
 use crate::types::{BlockHeight, BlockInfo};
 use bitcoin::{Block, BlockHash, Txid};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
@@ -16,6 +17,10 @@ impl BitcoinClient {
         let client = Client::new(url.as_ref(), auth).map_err(BitcoinClientError::NewClientError)?;
 
         Ok(Self { client })
+    }
+
+    pub fn new_from_config(config: &RpcConfig) -> Result<Self, BitcoinClientError> {
+        Self::new(&config.url, &config.username, &config.password)
     }
 }
 
