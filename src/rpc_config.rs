@@ -1,7 +1,7 @@
 use bitcoin::Network;
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct RpcConfig {
     pub network: Network,
     pub url: String,
