@@ -54,6 +54,8 @@ pub trait BitcoinClientApi {
 
     fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError>;
 
+    fn mine_block(&self) -> Result<(), BitcoinClientError>;
+
     fn mine_blocks(&self, block_num: u64, address: &Address) -> Result<(), BitcoinClientError>;
 
     fn get_new_address(&self, pk: PublicKey, network: Network) -> Address;
@@ -184,6 +186,22 @@ impl BitcoinClientApi for BitcoinClient {
     fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError> {
         let tx = self.client.get_raw_transaction(txid, None).ok();
         Ok(tx)
+    }
+
+    fn mine_block(&self) -> Result<(), BitcoinClientError> {
+        let network = self.get_blockchain_info()?;
+
+        if network != "REGTEST" {
+            return Err(BitcoinClientError::InvalidNetwork);
+        }
+
+        self.client
+            .generate(1, None)
+            .map_err(|e| BitcoinClientError::FailedToMineBlocks {
+                error: e.to_string(),
+            })?;
+
+        Ok(())
     }
 
     fn mine_blocks(&self, block_num: u64, address: &Address) -> Result<(), BitcoinClientError> {
