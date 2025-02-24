@@ -1,7 +1,10 @@
 use crate::errors::BitcoinClientError;
 use crate::rpc_config::RpcConfig;
 use crate::types::{BlockHeight, BlockInfo};
-use bitcoin::{Block, BlockHash, Txid};
+use bitcoin::consensus::encode::serialize_hex;
+use bitcoin::{
+    Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PublicKey, Transaction, Txid,
+};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use mockall::automock;
 
@@ -13,8 +16,7 @@ pub struct BitcoinClient {
 impl BitcoinClient {
     pub fn new(url: &str, user: &str, pass: &str) -> Result<Self, BitcoinClientError> {
         let auth = Auth::UserPass(user.to_owned(), pass.to_owned());
-
-        let client = Client::new(url.as_ref(), auth).map_err(BitcoinClientError::NewClientError)?;
+        let client = Client::new(url, auth).map_err(BitcoinClientError::NewClientError)?;
 
         Ok(Self { client })
     }
@@ -41,6 +43,26 @@ pub trait BitcoinClientApi {
     fn get_blockchain_info(&self) -> Result<String, BitcoinClientError>;
 
     fn tx_exists(&self, tx_id: &Txid) -> bool;
+
+    fn fund_address(
+        &self,
+        address: &Address,
+        amount: Amount,
+    ) -> Result<(Transaction, u32), BitcoinClientError>;
+
+    fn send_transaction(&self, tx: Transaction) -> Result<Txid, BitcoinClientError>;
+
+    fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError>;
+
+    fn mine_blocks(&self, block_num: u64, address: &Address) -> Result<(), BitcoinClientError>;
+
+    fn get_new_address(&self, pk: PublicKey, network: Network) -> Address;
+
+    fn init_wallet(
+        &self,
+        network: Network,
+        wallet_name: &str,
+    ) -> Result<Address, BitcoinClientError>;
 }
 
 #[automock]
@@ -95,5 +117,139 @@ impl BitcoinClientApi for BitcoinClient {
             .get_by_id(hash)
             .map_err(BitcoinClientError::ClientError)?;
         Ok(block)
+    }
+
+    fn fund_address(
+        &self,
+        address: &Address,
+        amount: Amount,
+    ) -> Result<(Transaction, u32), BitcoinClientError> {
+        let network = self.get_blockchain_info()?;
+
+        if network != "REGTEST" {
+            return Err(BitcoinClientError::InvalidNetwork);
+        }
+
+        // send BTC to address
+        let txid = self
+            .client
+            .send_to_address(address, amount, None, None, None, None, None, None)
+            .map_err(|e| BitcoinClientError::FailedToFundAddress {
+                error: e.to_string(),
+            })?;
+
+        // mine a block to confirm transaction
+        self.mine_blocks(1, address)?;
+
+        // get transaction details
+        let tx_info = self
+            .client
+            .get_transaction(&txid, Some(true))
+            .map_err(|e| BitcoinClientError::FailedToGetTransactionDetails {
+                error: e.to_string(),
+            })?;
+
+        let tx = tx_info.transaction().map_err(|e| {
+            BitcoinClientError::FailedToGetTransactionDetails {
+                error: e.to_string(),
+            }
+        })?;
+
+        let vout = tx_info
+            .details
+            .first()
+            .expect("No details found for transaction")
+            .vout;
+
+        Ok((tx, vout))
+    }
+
+    fn send_transaction(&self, tx: Transaction) -> Result<Txid, BitcoinClientError> {
+        let serialized_tx = serialize_hex(&tx);
+
+        let result = self.client.send_raw_transaction(serialized_tx);
+
+        if let Err(e) = result {
+            println!("Error: {:?}", e);
+            return Err(BitcoinClientError::FailedToSendTransaction {
+                error: e.to_string(),
+            });
+        }
+
+        let txid = result.unwrap();
+
+        Ok(txid)
+    }
+
+    fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError> {
+        let tx = self.client.get_raw_transaction(txid, None).ok();
+        Ok(tx)
+    }
+
+    fn mine_blocks(&self, block_num: u64, address: &Address) -> Result<(), BitcoinClientError> {
+        let network = self.get_blockchain_info()?;
+
+        if network != "REGTEST" {
+            return Err(BitcoinClientError::InvalidNetwork);
+        }
+
+        self.client
+            .generate_to_address(block_num, address)
+            .map_err(|e| BitcoinClientError::FailedToMineBlocks {
+                error: e.to_string(),
+            })?;
+
+        Ok(())
+    }
+
+    fn get_new_address(&self, pk: PublicKey, network: Network) -> Address {
+        let compressed = CompressedPublicKey::try_from(pk).unwrap();
+        let address = Address::p2wpkh(&compressed, network).as_unchecked().clone();
+        address.clone().require_network(network).unwrap()
+    }
+
+    fn init_wallet(
+        &self,
+        network: Network,
+        wallet_name: &str,
+    ) -> Result<Address, BitcoinClientError> {
+        let wallets =
+            self.client
+                .list_wallets()
+                .map_err(|e| BitcoinClientError::FailedToListWallets {
+                    error: e.to_string(),
+                })?;
+        if !wallets.contains(&wallet_name.to_string()) {
+            match self
+                .client
+                .create_wallet(wallet_name, None, None, None, None)
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(BitcoinClientError::FailedToCreateWallet {
+                        error: e.to_string(),
+                    })
+                }
+            };
+        }
+
+        let wallet = self
+            .client
+            .get_new_address(None, None)
+            .map_err(|e| BitcoinClientError::FailedToGetNewAddress {
+                error: e.to_string(),
+            })?
+            .require_network(network)
+            .map_err(|e| BitcoinClientError::FailedToGetNewAddress {
+                error: e.to_string(),
+            })?;
+
+        self.client.generate_to_address(105, &wallet).map_err(|e| {
+            BitcoinClientError::FailedToMineBlocks {
+                error: e.to_string(),
+            }
+        })?;
+
+        Ok(wallet)
     }
 }
