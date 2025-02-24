@@ -54,9 +54,13 @@ pub trait BitcoinClientApi {
 
     fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError>;
 
-    fn mine_block(&self) -> Result<(), BitcoinClientError>;
+    fn mine_blocks(&self, block_num: u64) -> Result<(), BitcoinClientError>;
 
-    fn mine_blocks(&self, block_num: u64, address: &Address) -> Result<(), BitcoinClientError>;
+    fn mine_blocks_to_address(
+        &self,
+        block_num: u64,
+        address: &Address,
+    ) -> Result<(), BitcoinClientError>;
 
     fn get_new_address(&self, pk: PublicKey, network: Network) -> Address;
 
@@ -141,7 +145,7 @@ impl BitcoinClientApi for BitcoinClient {
             })?;
 
         // mine a block to confirm transaction
-        self.mine_blocks(1, address)?;
+        self.mine_blocks_to_address(1, address)?;
 
         // get transaction details
         let tx_info = self
@@ -188,23 +192,27 @@ impl BitcoinClientApi for BitcoinClient {
         Ok(tx)
     }
 
-    fn mine_block(&self) -> Result<(), BitcoinClientError> {
+    fn mine_blocks(&self, block_num: u64) -> Result<(), BitcoinClientError> {
         let network = self.get_blockchain_info()?;
 
         if network != "REGTEST" {
             return Err(BitcoinClientError::InvalidNetwork);
         }
 
-        self.client
-            .generate(1, None)
-            .map_err(|e| BitcoinClientError::FailedToMineBlocks {
+        self.client.generate(block_num, None).map_err(|e| {
+            BitcoinClientError::FailedToMineBlocks {
                 error: e.to_string(),
-            })?;
+            }
+        })?;
 
         Ok(())
     }
 
-    fn mine_blocks(&self, block_num: u64, address: &Address) -> Result<(), BitcoinClientError> {
+    fn mine_blocks_to_address(
+        &self,
+        block_num: u64,
+        address: &Address,
+    ) -> Result<(), BitcoinClientError> {
         let network = self.get_blockchain_info()?;
 
         if network != "REGTEST" {
@@ -262,12 +270,29 @@ impl BitcoinClientApi for BitcoinClient {
                 error: e.to_string(),
             })?;
 
-        self.client.generate_to_address(105, &wallet).map_err(|e| {
-            BitcoinClientError::FailedToMineBlocks {
-                error: e.to_string(),
-            }
-        })?;
-
         Ok(wallet)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::Network;
+
+    #[test]
+    #[ignore]
+    fn test_mine_blocks() {
+        let bitcoin_client =
+            BitcoinClient::new("http://127.0.0.1:18443", "foo", "rpcpassword").unwrap();
+
+        let blocks = bitcoin_client.get_best_block().unwrap();
+        println!("Blocks: {:?}", blocks);
+        let wallet = bitcoin_client
+            .init_wallet(Network::Regtest, "test_wallet")
+            .unwrap();
+        bitcoin_client.mine_blocks_to_address(1, &wallet).unwrap();
+
+        let blocks = bitcoin_client.get_best_block().unwrap();
+        println!("Blocks: {:?}", blocks);
     }
 }
