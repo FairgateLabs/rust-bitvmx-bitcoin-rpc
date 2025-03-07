@@ -69,6 +69,8 @@ pub trait BitcoinClientApi {
         network: Network,
         wallet_name: &str,
     ) -> Result<Address, BitcoinClientError>;
+
+    fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError>;
 }
 
 #[automock]
@@ -271,6 +273,14 @@ impl BitcoinClientApi for BitcoinClient {
             })?;
 
         Ok(wallet)
+    }
+
+    fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError> {
+        self
+            .client
+            .invalidate_block(hash)
+            .map_err(|e|BitcoinClientError::FailedToInvalidateBlock { error: e.to_string() })?;
+        Ok(())
     }
 }
 

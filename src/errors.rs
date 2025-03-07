@@ -34,4 +34,10 @@ pub enum BitcoinClientError {
 
     #[error("Invalid network")]
     InvalidNetwork,
+
+    #[error("Failed to load wallet")]
+    FailedToLoadWallet { error: String },
+
+    #[error("Failed to invalidate block")]
+    FailedToInvalidateBlock { error: String },
 }
