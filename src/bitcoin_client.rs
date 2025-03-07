@@ -276,6 +276,12 @@ impl BitcoinClientApi for BitcoinClient {
     }
 
     fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError> {
+        let network = self.get_blockchain_info()?;
+
+        if network != "REGTEST" {
+            return Err(BitcoinClientError::InvalidNetwork);
+        }
+        
         self
             .client
             .invalidate_block(hash)
