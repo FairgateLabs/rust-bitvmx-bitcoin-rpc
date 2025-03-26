@@ -54,8 +54,6 @@ pub trait BitcoinClientApi {
 
     fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError>;
 
-    fn mine_blocks(&self, block_num: u64) -> Result<(), BitcoinClientError>;
-
     fn mine_blocks_to_address(
         &self,
         block_num: u64,
@@ -194,22 +192,6 @@ impl BitcoinClientApi for BitcoinClient {
         Ok(tx)
     }
 
-    fn mine_blocks(&self, block_num: u64) -> Result<(), BitcoinClientError> {
-        let network = self.get_blockchain_info()?;
-
-        if network != "REGTEST" {
-            return Err(BitcoinClientError::InvalidNetwork);
-        }
-
-        self.client.generate(block_num, None).map_err(|e| {
-            BitcoinClientError::FailedToMineBlocks {
-                error: e.to_string(),
-            }
-        })?;
-
-        Ok(())
-    }
-
     fn mine_blocks_to_address(
         &self,
         block_num: u64,
@@ -281,11 +263,12 @@ impl BitcoinClientApi for BitcoinClient {
         if network != "REGTEST" {
             return Err(BitcoinClientError::InvalidNetwork);
         }
-        
-        self
-            .client
-            .invalidate_block(hash)
-            .map_err(|e|BitcoinClientError::FailedToInvalidateBlock { error: e.to_string() })?;
+
+        self.client.invalidate_block(hash).map_err(|e| {
+            BitcoinClientError::FailedToInvalidateBlock {
+                error: e.to_string(),
+            }
+        })?;
         Ok(())
     }
 }
@@ -297,7 +280,7 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn test_mine_blocks() {
+    fn mine_blocks_to_address_test() {
         let bitcoin_client =
             BitcoinClient::new("http://127.0.0.1:18443", "foo", "rpcpassword").unwrap();
 
