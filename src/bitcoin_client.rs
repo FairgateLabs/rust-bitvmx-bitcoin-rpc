@@ -1,11 +1,12 @@
 use crate::errors::BitcoinClientError;
 use crate::rpc_config::RpcConfig;
+use crate::minreq_https::MinreqHttpsTransport;
 use crate::types::{BlockHeight, BlockInfo};
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
     Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PublicKey, Transaction, Txid,
 };
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
 
 #[derive(Debug)]
@@ -15,8 +16,22 @@ pub struct BitcoinClient {
 
 impl BitcoinClient {
     pub fn new(url: &str, user: &str, pass: &str) -> Result<Self, BitcoinClientError> {
-        let auth = Auth::UserPass(user.to_owned(), pass.to_owned());
-        let client = Client::new(url, auth).map_err(BitcoinClientError::NewClientError)?;
+
+        let transport = if user != "" {
+            MinreqHttpsTransport::builder()
+                .url(url)
+                .map_err(BitcoinClientError::NewClientError)?
+                .basic_auth(user.to_owned(), match pass.is_empty() {
+                    true => None,
+                    false => Some(pass.to_owned())
+                })
+                .build()
+        } else {
+            MinreqHttpsTransport::builder().url(url).map_err(BitcoinClientError::NewClientError)?.build()
+        };
+
+        let from_jsonrpc = jsonrpc::client::Client::with_transport(transport);
+        let client = Client::from_jsonrpc(from_jsonrpc);
 
         Ok(Self { client })
     }

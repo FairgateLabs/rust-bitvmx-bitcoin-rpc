@@ -1,4 +1,5 @@
 use thiserror::Error;
+use crate::minreq_https;
 
 #[derive(Error, Debug)]
 pub enum BitcoinClientError {
@@ -6,10 +7,10 @@ pub enum BitcoinClientError {
     InvalidHeight,
 
     #[error("Error creating client")]
-    NewClientError(#[from] bitcoincore_rpc::Error),
+    NewClientError(#[from] minreq_https::Error),
 
     #[error("Error getting blockchain info")]
-    ClientError(bitcoincore_rpc::Error),
+    ClientError(#[from] bitcoincore_rpc::Error),
 
     #[error("Failed to fund address")]
     FailedToFundAddress { error: String },
