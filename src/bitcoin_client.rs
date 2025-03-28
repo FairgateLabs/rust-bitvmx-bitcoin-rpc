@@ -6,6 +6,7 @@ use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
     Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PublicKey, Transaction, Txid,
 };
+use bitcoincore_rpc::json::GetBlockchainInfoResult;
 use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
 
@@ -55,7 +56,9 @@ pub trait BitcoinClientApi {
 
     fn get_block_by_hash(&self, hash: &BlockHash) -> Result<Block, BitcoinClientError>;
 
-    fn get_blockchain_info(&self) -> Result<String, BitcoinClientError>;
+    fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResult, BitcoinClientError>;
+
+    fn get_network(&self) -> Result<String, BitcoinClientError>;
 
     fn tx_exists(&self, tx_id: &Txid) -> bool;
 
@@ -93,7 +96,12 @@ impl BitcoinClientApi for BitcoinClient {
         tx.is_ok()
     }
 
-    fn get_blockchain_info(&self) -> Result<String, BitcoinClientError> {
+    fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResult, BitcoinClientError> {
+        let blockchain_info = self.client.get_blockchain_info()?;
+        Ok(blockchain_info)
+    }
+
+    fn get_network(&self) -> Result<String, BitcoinClientError> {
         let network = self.client.get_blockchain_info()?.chain;
         Ok(network.to_string().to_uppercase())
     }
@@ -145,9 +153,9 @@ impl BitcoinClientApi for BitcoinClient {
         address: &Address,
         amount: Amount,
     ) -> Result<(Transaction, u32), BitcoinClientError> {
-        let network = self.get_blockchain_info()?;
+        let blockchain_info = self.get_blockchain_info()?;
 
-        if network != "REGTEST" {
+        if blockchain_info.chain != Network::Regtest {
             return Err(BitcoinClientError::InvalidNetwork);
         }
 
@@ -212,9 +220,9 @@ impl BitcoinClientApi for BitcoinClient {
         block_num: u64,
         address: &Address,
     ) -> Result<(), BitcoinClientError> {
-        let network = self.get_blockchain_info()?;
+        let blockchain_info = self.get_blockchain_info()?;
 
-        if network != "REGTEST" {
+        if blockchain_info.chain != Network::Regtest {
             return Err(BitcoinClientError::InvalidNetwork);
         }
 
@@ -273,9 +281,9 @@ impl BitcoinClientApi for BitcoinClient {
     }
 
     fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError> {
-        let network = self.get_blockchain_info()?;
+        let blockchain_info = self.get_blockchain_info()?;
 
-        if network != "REGTEST" {
+        if blockchain_info.chain != Network::Regtest {
             return Err(BitcoinClientError::InvalidNetwork);
         }
 
