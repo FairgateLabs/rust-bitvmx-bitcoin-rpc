@@ -1,3 +1,4 @@
+use bitcoin::hex::HexToArrayError;
 use thiserror::Error;
 use crate::minreq_https;
 
@@ -12,11 +13,17 @@ pub enum BitcoinClientError {
     #[error("Error getting blockchain info")]
     ClientError(#[from] bitcoincore_rpc::Error),
 
+    #[error("Invalid block hash")]
+    InvalidBlockHash(#[from] HexToArrayError),
+
     #[error("Failed to fund address")]
     FailedToFundAddress { error: String },
 
     #[error("Failed to get transaction details")]
     FailedToGetTransactionDetails { error: String },
+
+    #[error("Failed to get tx output")]
+    FailedToGetTxOutput { error: String },
 
     #[error("Failed to send transaction")]
     FailedToSendTransaction { error: String },

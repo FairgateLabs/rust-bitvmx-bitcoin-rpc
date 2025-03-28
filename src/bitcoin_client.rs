@@ -7,6 +7,7 @@ use bitcoin::{
     Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PublicKey, Transaction, Txid,
 };
 use bitcoincore_rpc::json::GetBlockchainInfoResult;
+use bitcoincore_rpc::json::GetTxOutResult;
 use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
 
@@ -58,9 +59,9 @@ pub trait BitcoinClientApi {
 
     fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResult, BitcoinClientError>;
 
-    fn get_network(&self) -> Result<String, BitcoinClientError>;
-
     fn tx_exists(&self, tx_id: &Txid) -> bool;
+
+    fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError>;
 
     fn fund_address(
         &self,
@@ -68,7 +69,8 @@ pub trait BitcoinClientApi {
         amount: Amount,
     ) -> Result<(Transaction, u32), BitcoinClientError>;
 
-    fn send_transaction(&self, tx: Transaction) -> Result<Txid, BitcoinClientError>;
+
+    fn send_transaction(&self, tx: &Transaction) -> Result<Txid, BitcoinClientError>;
 
     fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError>;
 
@@ -99,11 +101,6 @@ impl BitcoinClientApi for BitcoinClient {
     fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResult, BitcoinClientError> {
         let blockchain_info = self.client.get_blockchain_info()?;
         Ok(blockchain_info)
-    }
-
-    fn get_network(&self) -> Result<String, BitcoinClientError> {
-        let network = self.client.get_blockchain_info()?.chain;
-        Ok(network.to_string().to_uppercase())
     }
 
     fn get_best_block(&self) -> Result<BlockHeight, BitcoinClientError> {
@@ -146,6 +143,11 @@ impl BitcoinClientApi for BitcoinClient {
             .get_by_id(hash)
             .map_err(BitcoinClientError::ClientError)?;
         Ok(block)
+    }
+
+    fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError> {
+        let tx_out_result = self.client.get_tx_out(txid, vout, Some(false))?;
+        tx_out_result.ok_or(BitcoinClientError::FailedToGetTxOutput { error: "Tx output not found".to_string() })
     }
 
     fn fund_address(
@@ -193,7 +195,7 @@ impl BitcoinClientApi for BitcoinClient {
         Ok((tx, vout))
     }
 
-    fn send_transaction(&self, tx: Transaction) -> Result<Txid, BitcoinClientError> {
+    fn send_transaction(&self, tx: &Transaction) -> Result<Txid, BitcoinClientError> {
         let serialized_tx = serialize_hex(&tx);
 
         let result = self.client.send_raw_transaction(serialized_tx);
