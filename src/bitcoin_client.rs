@@ -18,15 +18,16 @@ pub struct BitcoinClient {
 
 impl BitcoinClient {
     pub fn new(url: &str, user: &str, pass: &str) -> Result<Self, BitcoinClientError> {
+        let pass = match pass.is_empty() {
+            true => None,
+            false => Some(pass.to_owned())
+        };
 
         let transport = if user != "" {
             MinreqHttpsTransport::builder()
                 .url(url)
                 .map_err(BitcoinClientError::NewClientError)?
-                .basic_auth(user.to_owned(), match pass.is_empty() {
-                    true => None,
-                    false => Some(pass.to_owned())
-                })
+                .basic_auth(user.to_owned(), pass)
                 .build()
         } else {
             MinreqHttpsTransport::builder().url(url).map_err(BitcoinClientError::NewClientError)?.build()

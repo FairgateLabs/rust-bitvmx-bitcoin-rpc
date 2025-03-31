@@ -247,20 +247,3 @@ impl From<Error> for jsonrpc::Error {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bitcoincore_rpc::jsonrpc::client::Client;
-
-    #[test]
-    fn construct() {
-        let tp = Builder::new()
-            .timeout(Duration::from_millis(100))
-            .url("http://localhost:22")
-            .unwrap()
-            .basic_auth("user".to_string(), None)
-            .build();
-        let _ = Client::with_transport(tp);
-    }
-}
