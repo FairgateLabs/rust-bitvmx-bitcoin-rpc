@@ -1,11 +1,14 @@
 use crate::errors::BitcoinClientError;
 use crate::rpc_config::RpcConfig;
+use crate::minreq_https::MinreqHttpsTransport;
 use crate::types::{BlockHeight, BlockInfo};
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
     Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PublicKey, Transaction, Txid,
 };
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use bitcoincore_rpc::json::GetBlockchainInfoResult;
+use bitcoincore_rpc::json::GetTxOutResult;
+use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
 
 #[derive(Debug)]
@@ -15,8 +18,23 @@ pub struct BitcoinClient {
 
 impl BitcoinClient {
     pub fn new(url: &str, user: &str, pass: &str) -> Result<Self, BitcoinClientError> {
-        let auth = Auth::UserPass(user.to_owned(), pass.to_owned());
-        let client = Client::new(url, auth).map_err(BitcoinClientError::NewClientError)?;
+        let pass = match pass.is_empty() {
+            true => None,
+            false => Some(pass.to_owned())
+        };
+
+        let transport = if user != "" {
+            MinreqHttpsTransport::builder()
+                .url(url)
+                .map_err(BitcoinClientError::NewClientError)?
+                .basic_auth(user.to_owned(), pass)
+                .build()
+        } else {
+            MinreqHttpsTransport::builder().url(url).map_err(BitcoinClientError::NewClientError)?.build()
+        };
+
+        let from_jsonrpc = jsonrpc::client::Client::with_transport(transport);
+        let client = Client::from_jsonrpc(from_jsonrpc);
 
         Ok(Self { client })
     }
@@ -40,9 +58,11 @@ pub trait BitcoinClientApi {
 
     fn get_block_by_hash(&self, hash: &BlockHash) -> Result<Block, BitcoinClientError>;
 
-    fn get_blockchain_info(&self) -> Result<String, BitcoinClientError>;
+    fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResult, BitcoinClientError>;
 
     fn tx_exists(&self, tx_id: &Txid) -> bool;
+
+    fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError>;
 
     fn fund_address(
         &self,
@@ -50,7 +70,8 @@ pub trait BitcoinClientApi {
         amount: Amount,
     ) -> Result<(Transaction, u32), BitcoinClientError>;
 
-    fn send_transaction(&self, tx: Transaction) -> Result<Txid, BitcoinClientError>;
+
+    fn send_transaction(&self, tx: &Transaction) -> Result<Txid, BitcoinClientError>;
 
     fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError>;
 
@@ -78,9 +99,9 @@ impl BitcoinClientApi for BitcoinClient {
         tx.is_ok()
     }
 
-    fn get_blockchain_info(&self) -> Result<String, BitcoinClientError> {
-        let network = self.client.get_blockchain_info()?.chain;
-        Ok(network.to_string().to_uppercase())
+    fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResult, BitcoinClientError> {
+        let blockchain_info = self.client.get_blockchain_info()?;
+        Ok(blockchain_info)
     }
 
     fn get_best_block(&self) -> Result<BlockHeight, BitcoinClientError> {
@@ -125,14 +146,19 @@ impl BitcoinClientApi for BitcoinClient {
         Ok(block)
     }
 
+    fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError> {
+        let tx_out_result = self.client.get_tx_out(txid, vout, Some(false))?;
+        tx_out_result.ok_or(BitcoinClientError::FailedToGetTxOutput { error: "Tx output not found".to_string() })
+    }
+
     fn fund_address(
         &self,
         address: &Address,
         amount: Amount,
     ) -> Result<(Transaction, u32), BitcoinClientError> {
-        let network = self.get_blockchain_info()?;
+        let blockchain_info = self.get_blockchain_info()?;
 
-        if network != "REGTEST" {
+        if blockchain_info.chain != Network::Regtest {
             return Err(BitcoinClientError::InvalidNetwork);
         }
 
@@ -170,7 +196,7 @@ impl BitcoinClientApi for BitcoinClient {
         Ok((tx, vout))
     }
 
-    fn send_transaction(&self, tx: Transaction) -> Result<Txid, BitcoinClientError> {
+    fn send_transaction(&self, tx: &Transaction) -> Result<Txid, BitcoinClientError> {
         let serialized_tx = serialize_hex(&tx);
 
         let result = self.client.send_raw_transaction(serialized_tx);
@@ -197,9 +223,9 @@ impl BitcoinClientApi for BitcoinClient {
         block_num: u64,
         address: &Address,
     ) -> Result<(), BitcoinClientError> {
-        let network = self.get_blockchain_info()?;
+        let blockchain_info = self.get_blockchain_info()?;
 
-        if network != "REGTEST" {
+        if blockchain_info.chain != Network::Regtest {
             return Err(BitcoinClientError::InvalidNetwork);
         }
 
@@ -258,9 +284,9 @@ impl BitcoinClientApi for BitcoinClient {
     }
 
     fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError> {
-        let network = self.get_blockchain_info()?;
+        let blockchain_info = self.get_blockchain_info()?;
 
-        if network != "REGTEST" {
+        if blockchain_info.chain != Network::Regtest {
             return Err(BitcoinClientError::InvalidNetwork);
         }
 
