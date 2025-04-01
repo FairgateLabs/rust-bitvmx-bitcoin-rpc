@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bitcoin = "0.32.2"
+bitcoin = "0.32.4"
 bitcoincore-rpc = "0.19"
 thiserror = "2.0.12"
 serde = { version = "1.0.205", features = ["derive"] }
