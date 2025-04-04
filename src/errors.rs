@@ -1,6 +1,6 @@
+use crate::minreq_https;
 use bitcoin::hex::HexToArrayError;
 use thiserror::Error;
-use crate::minreq_https;
 
 #[derive(Error, Debug)]
 pub enum BitcoinClientError {
@@ -10,7 +10,7 @@ pub enum BitcoinClientError {
     #[error("Error creating client")]
     NewClientError(#[from] minreq_https::Error),
 
-    #[error("Error getting blockchain info")]
+    #[error("Client error {0}")]
     ClientError(#[from] bitcoincore_rpc::Error),
 
     #[error("Invalid block hash")]
