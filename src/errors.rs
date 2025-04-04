@@ -7,13 +7,13 @@ pub enum BitcoinClientError {
     #[error("Invalid block height")]
     InvalidHeight,
 
-    #[error("Error creating client")]
+    #[error("Error creating client {0}")]
     NewClientError(#[from] minreq_https::Error),
 
-    #[error("Client error {0}")]
-    ClientError(#[from] bitcoincore_rpc::Error),
+    #[error("Rpc error {0}")]
+    RpcError(#[from] bitcoincore_rpc::Error),
 
-    #[error("Invalid block hash")]
+    #[error("Invalid block hash {0}")]
     InvalidBlockHash(#[from] HexToArrayError),
 
     #[error("Failed to fund address")]
