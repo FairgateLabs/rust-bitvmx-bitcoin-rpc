@@ -1,6 +1,6 @@
 use crate::errors::BitcoinClientError;
-use crate::rpc_config::RpcConfig;
 use crate::minreq_https::MinreqHttpsTransport;
+use crate::rpc_config::RpcConfig;
 use crate::types::{BlockHeight, BlockInfo};
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
@@ -20,17 +20,16 @@ impl BitcoinClient {
     pub fn new(url: &str, user: &str, pass: &str) -> Result<Self, BitcoinClientError> {
         let pass = match pass.is_empty() {
             true => None,
-            false => Some(pass.to_owned())
+            false => Some(pass.to_owned()),
         };
 
         let transport = if user != "" {
             MinreqHttpsTransport::builder()
-                .url(url)
-                .map_err(BitcoinClientError::NewClientError)?
+                .url(url)?
                 .basic_auth(user.to_owned(), pass)
                 .build()
         } else {
-            MinreqHttpsTransport::builder().url(url).map_err(BitcoinClientError::NewClientError)?.build()
+            MinreqHttpsTransport::builder().url(url)?.build()
         };
 
         let from_jsonrpc = jsonrpc::client::Client::with_transport(transport);
@@ -69,7 +68,6 @@ pub trait BitcoinClientApi {
         address: &Address,
         amount: Amount,
     ) -> Result<(Transaction, u32), BitcoinClientError>;
-
 
     fn send_transaction(&self, tx: &Transaction) -> Result<Txid, BitcoinClientError>;
 
@@ -131,24 +129,20 @@ impl BitcoinClientApi for BitcoinClient {
         &self,
         height: &BlockHeight,
     ) -> Result<BlockHash, BitcoinClientError> {
-        let block_hash = self
-            .client
-            .get_block_hash(u64::from(*height))
-            .map_err(BitcoinClientError::ClientError)?;
+        let block_hash = self.client.get_block_hash(u64::from(*height))?;
         Ok(block_hash)
     }
 
     fn get_block_by_hash(&self, hash: &BlockHash) -> Result<Block, BitcoinClientError> {
-        let block = self
-            .client
-            .get_by_id(hash)
-            .map_err(BitcoinClientError::ClientError)?;
+        let block = self.client.get_by_id(hash)?;
         Ok(block)
     }
 
     fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError> {
         let tx_out_result = self.client.get_tx_out(txid, vout, Some(false))?;
-        tx_out_result.ok_or(BitcoinClientError::FailedToGetTxOutput { error: "Tx output not found".to_string() })
+        tx_out_result.ok_or(BitcoinClientError::FailedToGetTxOutput {
+            error: "Tx output not found".to_string(),
+        })
     }
 
     fn fund_address(

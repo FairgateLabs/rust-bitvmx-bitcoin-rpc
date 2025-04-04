@@ -1,19 +1,19 @@
+use crate::minreq_https;
 use bitcoin::hex::HexToArrayError;
 use thiserror::Error;
-use crate::minreq_https;
 
 #[derive(Error, Debug)]
 pub enum BitcoinClientError {
     #[error("Invalid block height")]
     InvalidHeight,
 
-    #[error("Error creating client")]
+    #[error("Error creating client {0}")]
     NewClientError(#[from] minreq_https::Error),
 
-    #[error("Error getting blockchain info")]
-    ClientError(#[from] bitcoincore_rpc::Error),
+    #[error("Rpc error {0}")]
+    RpcError(#[from] bitcoincore_rpc::Error),
 
-    #[error("Invalid block hash")]
+    #[error("Invalid block hash {0}")]
     InvalidBlockHash(#[from] HexToArrayError),
 
     #[error("Failed to fund address")]
