@@ -1,6 +1,7 @@
-use crate::minreq_https;
 use bitcoin::hex::HexToArrayError;
 use thiserror::Error;
+
+use crate::reqwest_https;
 
 #[derive(Error, Debug)]
 pub enum BitcoinClientError {
@@ -8,7 +9,7 @@ pub enum BitcoinClientError {
     InvalidHeight,
 
     #[error("Error creating client {0}")]
-    NewClientError(#[from] minreq_https::Error),
+    NewClientError(#[from] reqwest_https::Error),
 
     #[error("Rpc error {0}")]
     RpcError(#[from] bitcoincore_rpc::Error),
