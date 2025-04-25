@@ -1,48 +1,51 @@
-//! This module implements the [`crate::client::Transport`] trait using [`minreq`]
-//! as the underlying HTTP transport.
-//!
-//! [minreq]: <https://github.com/neonmoe/minreq>
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{error, fmt};
 
 use bitcoincore_rpc::jsonrpc::{self, base64, Request, Response, Transport};
+use reqwest::blocking::Client;
 
 const DEFAULT_URL: &str = "http://localhost";
 const DEFAULT_PORT: u16 = 8332; // the default RPC port for bitcoind.
 const DEFAULT_TIMEOUT_SECONDS: u64 = 15;
 
-/// An HTTPS transport that uses [`minreq`] and is useful for running a bitcoind RPC client.
+/// An HTTPS transport that uses [`reqwest`] and is useful for running a bitcoind RPC client.
 #[derive(Clone, Debug)]
-pub struct MinreqHttpsTransport {
+pub struct ReqwestHttpsTransport {
     /// URL of the RPC server.
     url: String,
-    /// timeout only supports second granularity.
-    timeout: Duration,
     /// The value of the `Authorization` HTTP header, i.e., a base64 encoding of 'user:password'.
     basic_auth: Option<String>,
     /// Headers to be added to the request.
     headers: HashMap<String, String>,
+    /// HTTP client with connection pooling
+    client: Client,
 }
 
-impl Default for MinreqHttpsTransport {
+impl Default for ReqwestHttpsTransport {
     fn default() -> Self {
-        MinreqHttpsTransport {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .build()
+            .expect("Failed to create reqwest client");
+
+        ReqwestHttpsTransport {
             url: format!("{}:{}", DEFAULT_URL, DEFAULT_PORT),
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
             basic_auth: None,
             headers: HashMap::new(),
+            client,
         }
     }
 }
 
-impl MinreqHttpsTransport {
-    /// Constructs a new [`MinreqHttpsTransport`] with default parameters.
+impl ReqwestHttpsTransport {
+    /// Constructs a new [`ReqwestHttpsTransport`] with default parameters.
     pub fn new() -> Self {
-        MinreqHttpsTransport::default()
+        ReqwestHttpsTransport::default()
     }
 
-    /// Returns a builder for [`MinreqHttpsTransport`].
+    /// Returns a builder for [`ReqwestHttpsTransport`].
     pub fn builder() -> Builder {
         Builder::new()
     }
@@ -51,39 +54,30 @@ impl MinreqHttpsTransport {
     where
         R: for<'a> serde::de::Deserialize<'a>,
     {
-        let req = match &self.basic_auth {
-            Some(auth) => minreq::Request::new(minreq::Method::Post, &self.url)
-                .with_timeout(self.timeout.as_secs())
-                .with_header("Authorization", auth)
-                .with_headers(self.headers.clone())
-                .with_json(&req)?,
-            None => minreq::Request::new(minreq::Method::Post, &self.url)
-                .with_timeout(self.timeout.as_secs())
-                .with_headers(self.headers.clone())
-                .with_json(&req)?,
-        };
+        let mut request = self.client.post(&self.url).json(&req);
 
-        // Send the request and parse the response. If the response is an error that does not
-        // contain valid JSON in its body (for instance if the bitcoind HTTP server work queue
-        // depth is exceeded), return the raw HTTP error so users can match against it.
-        let resp = req.send()?;
-        match resp.json() {
-            Ok(json) => Ok(json),
-            Err(minreq_err) => {
-                if resp.status_code != 200 {
-                    Err(Error::Http(HttpError {
-                        status_code: resp.status_code,
-                        body: resp.as_str().unwrap_or("").to_string(),
-                    }))
-                } else {
-                    Err(Error::Minreq(minreq_err))
-                }
-            }
+        if let Some(auth) = &self.basic_auth {
+            request = request.header("Authorization", auth);
         }
+
+        for (key, value) in &self.headers {
+            request = request.header(key, value);
+        }
+
+        let response = request.send()?;
+        
+        if !response.status().is_success() {
+            return Err(Error::Http(HttpError {
+                status_code: response.status().as_u16() as i32,
+                body: response.text().unwrap_or_default(),
+            }));
+        }
+
+        Ok(response.json()?)
     }
 }
 
-impl Transport for MinreqHttpsTransport {
+impl Transport for ReqwestHttpsTransport {
     fn send_request(&self, req: Request) -> Result<Response, jsonrpc::Error> {
         Ok(self.request(req)?)
     }
@@ -97,23 +91,28 @@ impl Transport for MinreqHttpsTransport {
     }
 }
 
-/// Builder for simple bitcoind [`MinreqHttpsTransport`].
+/// Builder for simple bitcoind [`ReqwestHttpsTransport`].
 #[derive(Clone, Debug)]
 pub struct Builder {
-    tp: MinreqHttpsTransport,
+    tp: ReqwestHttpsTransport,
 }
 
 impl Builder {
     /// Constructs a new [`Builder`] with default configuration and the URL to use.
     pub fn new() -> Builder {
         Builder {
-            tp: MinreqHttpsTransport::new(),
+            tp: ReqwestHttpsTransport::new(),
         }
     }
 
     /// Sets the timeout after which requests will abort if they aren't finished.
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.tp.timeout = timeout;
+        self.tp.client = Client::builder()
+            .timeout(timeout)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(10)
+            .build()
+            .expect("Failed to create reqwest client");
         self
     }
 
@@ -140,30 +139,8 @@ impl Builder {
         self
     }
 
-    /// Adds authentication information to the transport using a cookie string ('user:pass').
-    ///
-    /// Does no checking on the format of the cookie string, just base64 encodes whatever is passed in.
-    ///
-    /// # Examples
-    ///
-    /// use jsonrpc::minreq_http::MinreqHttpsTransport;
-    /// use std::fs::{self, File};
-    /// use std::path::Path;
-    /// let cookie_file = Path::new("~/.bitcoind/.cookie");
-    /// let mut file = File::open(cookie_file).expect("couldn't open cookie file");
-    /// let mut cookie = String::new();
-    /// fs::read_to_string(&mut cookie).expect("couldn't read cookie file");
-    /// let client = MinreqHttpsTransport::builder().cookie_auth(cookie);
-    pub fn cookie_auth<S: AsRef<str>>(mut self, cookie: S) -> Self {
-        self.tp.basic_auth = Some(format!(
-            "Basic {}",
-            &base64::encode(cookie.as_ref().as_bytes())
-        ));
-        self
-    }
-
-    /// Builds the final [`MinreqHttpsTransport`].
-    pub fn build(self) -> MinreqHttpsTransport {
+    /// Builds the final [`ReqwestHttpsTransport`].
+    pub fn build(self) -> ReqwestHttpsTransport {
         self.tp
     }
 }
@@ -191,16 +168,14 @@ impl fmt::Display for HttpError {
 
 impl error::Error for HttpError {}
 
-/// Error that can happen when sending requests. In case of error, a JSON error is returned if the
-/// body of the response could be parsed as such. Otherwise, an HTTP error is returned containing
-/// the status code and the raw body.
+/// Error that can happen when sending requests.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum Error {
     /// JSON parsing error.
     Json(serde_json::Error),
-    /// Minreq error.
-    Minreq(minreq::Error),
+    /// Reqwest error.
+    Reqwest(reqwest::Error),
     /// HTTP error that does not contain valid JSON as body.
     Http(HttpError),
 }
@@ -209,7 +184,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match *self {
             Error::Json(ref e) => write!(f, "parsing JSON failed: {}", e),
-            Error::Minreq(ref e) => write!(f, "minreq: {}", e),
+            Error::Reqwest(ref e) => write!(f, "reqwest: {}", e),
             Error::Http(ref e) => write!(f, "http ({})", e),
         }
     }
@@ -221,7 +196,7 @@ impl error::Error for Error {
 
         match *self {
             Json(ref e) => Some(e),
-            Minreq(ref e) => Some(e),
+            Reqwest(ref e) => Some(e),
             Http(ref e) => Some(e),
         }
     }
@@ -233,9 +208,9 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-impl From<minreq::Error> for Error {
-    fn from(e: minreq::Error) -> Self {
-        Error::Minreq(e)
+impl From<reqwest::Error> for Error {
+    fn from(e: reqwest::Error) -> Self {
+        Error::Reqwest(e)
     }
 }
 
@@ -246,4 +221,4 @@ impl From<Error> for jsonrpc::Error {
             e => jsonrpc::Error::Transport(Box::new(e)),
         }
     }
-}
+} 
