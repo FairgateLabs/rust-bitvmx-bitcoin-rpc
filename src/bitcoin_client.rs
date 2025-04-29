@@ -44,6 +44,36 @@ impl BitcoinClient {
     pub fn new_from_config(config: &RpcConfig) -> Result<Self, BitcoinClientError> {
         Self::new(&config.url, &config.username, &config.password)
     }
+
+    pub fn new_with_wallet(url: &str, user: &str, pass: &str, wallet_name:&str) -> Result<Self, BitcoinClientError> {
+        // let pass = match pass.is_empty() {
+        //     true => None,
+        //     false => Some(pass.to_owned()),
+        // };
+
+        // let transport = if user != "" {
+        //     MinreqHttpsTransport::builder()
+        //         .url(url)?
+        //         .basic_auth(user.to_owned(), pass)
+        //         .build()
+        // } else {
+        //     MinreqHttpsTransport::builder().url(url)?.build()
+        // };
+
+        //let from_jsonrpc = jsonrpc::client::Client::with_transport(transport);
+        //let client = Client::from_jsonrpc(from_jsonrpc);
+
+        let url = if !wallet_name.is_empty() {
+            format!("{}/wallet/{}", url.to_string(), wallet_name)
+        } else {
+            url.to_string()
+        };
+
+        let auth = Auth::UserPass(user.to_owned(), pass.to_owned());
+        let client = Client::new(&url, auth)?;
+
+        Ok(Self { client })
+    }
 }
 
 #[automock]
