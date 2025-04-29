@@ -8,7 +8,7 @@ use bitcoin::{
 };
 use bitcoincore_rpc::json::GetBlockchainInfoResult;
 use bitcoincore_rpc::json::GetTxOutResult;
-use bitcoincore_rpc::{Client, RpcApi, Auth};
+use bitcoincore_rpc::{Auth, Client, RpcApi};
 use mockall::automock;
 
 #[derive(Debug)]
@@ -43,6 +43,24 @@ impl BitcoinClient {
 
     pub fn new_from_config(config: &RpcConfig) -> Result<Self, BitcoinClientError> {
         Self::new(&config.url, &config.username, &config.password)
+    }
+
+    pub fn new_with_wallet(
+        url: &str,
+        user: &str,
+        pass: &str,
+        wallet_name: &str,
+    ) -> Result<Self, BitcoinClientError> {
+        let url = if !wallet_name.is_empty() {
+            format!("{}/wallet/{}", url.to_string(), wallet_name)
+        } else {
+            url.to_string()
+        };
+
+        let auth = Auth::UserPass(user.to_owned(), pass.to_owned());
+        let client = Client::new(&url, auth)?;
+
+        Ok(Self { client })
     }
 }
 
