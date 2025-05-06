@@ -54,10 +54,7 @@ impl BitcoinClient {
             url.to_string()
         };
 
-        let auth = Auth::UserPass(user.to_owned(), pass.to_owned());
-        let client = Client::new(&url, auth)?;
-
-        Ok(Self { client })
+        Self::new(&url, &user, &pass)
     }
 }
 
