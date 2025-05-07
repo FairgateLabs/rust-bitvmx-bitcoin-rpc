@@ -8,7 +8,7 @@ use bitcoin::{
 };
 use bitcoincore_rpc::json::GetBlockchainInfoResult;
 use bitcoincore_rpc::json::GetTxOutResult;
-use bitcoincore_rpc::{jsonrpc, Auth, Client, RpcApi};
+use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
 
 #[derive(Debug)]
