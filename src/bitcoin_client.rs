@@ -4,8 +4,7 @@ use crate::rpc_config::RpcConfig;
 use crate::types::{BlockHeight, BlockInfo};
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
-    Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PrivateKey, PublicKey,
-    Transaction, Txid,
+    Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PublicKey, Transaction, Txid,
 };
 use bitcoincore_rpc::json::GetTxOutResult;
 use bitcoincore_rpc::json::{EstimateMode, GetBlockchainInfoResult};
