@@ -9,3 +9,21 @@ pub struct RpcConfig {
     pub password: String,
     pub wallet: String,
 }
+
+impl RpcConfig {
+    pub fn new(
+        network: Network,
+        url: String,
+        username: String,
+        password: String,
+        wallet: String,
+    ) -> Self {
+        Self {
+            network,
+            url,
+            username,
+            password,
+            wallet,
+        }
+    }
+}

@@ -4,10 +4,11 @@ use crate::rpc_config::RpcConfig;
 use crate::types::{BlockHeight, BlockInfo};
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
-    Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PublicKey, Transaction, Txid,
+    Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PrivateKey, PublicKey,
+    Transaction, Txid,
 };
-use bitcoincore_rpc::json::GetBlockchainInfoResult;
 use bitcoincore_rpc::json::GetTxOutResult;
+use bitcoincore_rpc::json::{EstimateMode, GetBlockchainInfoResult};
 use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
 
@@ -103,10 +104,40 @@ pub trait BitcoinClientApi {
     ) -> Result<Address, BitcoinClientError>;
 
     fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError>;
+
+    fn estimate_smart_fee(&self) -> Result<Amount, BitcoinClientError>;
 }
 
 #[automock]
 impl BitcoinClientApi for BitcoinClient {
+    fn estimate_smart_fee(&self) -> Result<Amount, BitcoinClientError> {
+        const DEFAULT_FEE_RATE: Amount = Amount::from_sat(20); // 20 sat/vB
+
+        let estimate_fee = self
+            .client
+            .estimate_smart_fee(1, Some(EstimateMode::Conservative));
+
+        match estimate_fee {
+            Ok(estimate) => {
+                // Returns estimate fee rate in BTC/vkB
+                match estimate.fee_rate {
+                    Some(fee_rate) => {
+                        // convert fee_rate to sat/vB
+                        let fee_rate = Amount::from_sat(fee_rate.to_sat() / 1000);
+                        return Ok(fee_rate);
+                    }
+                    None => {
+                        return Ok(DEFAULT_FEE_RATE);
+                    }
+                }
+            }
+            Err(error) => {
+                // Handle the error returned by estimate_smart_fee
+                return Err(BitcoinClientError::RpcError(error));
+            }
+        }
+    }
+
     fn tx_exists(&self, tx_id: &Txid) -> bool {
         let tx = self.client.get_raw_transaction_info(tx_id, None);
         tx.is_ok()
