@@ -17,36 +17,36 @@ pub enum BitcoinClientError {
     #[error("Invalid block hash {0}")]
     InvalidBlockHash(#[from] HexToArrayError),
 
-    #[error("Failed to fund address")]
+    #[error("Failed to fund address {error}")]
     FailedToFundAddress { error: String },
 
-    #[error("Failed to get transaction details")]
+    #[error("Failed to get transaction details {error} ")]
     FailedToGetTransactionDetails { error: String },
 
-    #[error("Failed to get tx output")]
+    #[error("Failed to get tx output {error}")]
     FailedToGetTxOutput { error: String },
 
-    #[error("Failed to send transaction")]
+    #[error("Failed to send transaction {error} ")]
     FailedToSendTransaction { error: String },
 
-    #[error("Failed to mine blocks")]
+    #[error("Failed to mine blocks {error}")]
     FailedToMineBlocks { error: String },
 
-    #[error("Failed to create wallet")]
+    #[error("Failed to create wallet {error}")]
     FailedToCreateWallet { error: String },
 
-    #[error("Failed to list wallets")]
+    #[error("Failed to list wallets {error}")]
     FailedToListWallets { error: String },
 
-    #[error("Failed to get new address")]
+    #[error("Failed to get new address {error}")]
     FailedToGetNewAddress { error: String },
 
     #[error("Invalid network")]
     InvalidNetwork,
 
-    #[error("Failed to load wallet")]
+    #[error("Failed to load wallet {error}")]
     FailedToLoadWallet { error: String },
 
-    #[error("Failed to invalidate block")]
+    #[error("Failed to invalidate block {error}")]
     FailedToInvalidateBlock { error: String },
 }
