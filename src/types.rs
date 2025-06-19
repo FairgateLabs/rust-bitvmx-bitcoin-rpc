@@ -13,20 +13,3 @@ pub struct BlockInfo {
     pub prev_hash: BlockHash,
     pub txs: Vec<Transaction>,
 }
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FullBlock {
-    pub height: BlockHeight,
-    pub hash: BlockHash,
-    pub prev_hash: BlockHash,
-    pub txs: Vec<Transaction>,
-    pub orphan: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct TransactionInfo {
-    pub tx: Transaction,
-    pub block_height: BlockHeight,
-    pub block_hash: BlockHash,
-    pub orphan: bool,
-    pub confirmations: u32,
-}
