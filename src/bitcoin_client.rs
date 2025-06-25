@@ -6,8 +6,8 @@ use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
     Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PublicKey, Transaction, Txid,
 };
-use bitcoincore_rpc::json::GetTxOutResult;
 use bitcoincore_rpc::json::{EstimateMode, GetBlockchainInfoResult};
+use bitcoincore_rpc::json::{GetRawTransactionResult, GetTxOutResult};
 use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
 
@@ -88,6 +88,11 @@ pub trait BitcoinClientApi {
 
     fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError>;
 
+    fn get_raw_transaction_info(
+        &self,
+        tx_id: &Txid,
+    ) -> Result<GetRawTransactionResult, BitcoinClientError>;
+
     fn mine_blocks_to_address(
         &self,
         block_num: u64,
@@ -138,6 +143,14 @@ impl BitcoinClientApi for BitcoinClient {
     fn tx_exists(&self, tx_id: &Txid) -> bool {
         let tx = self.client.get_raw_transaction_info(tx_id, None);
         tx.is_ok()
+    }
+
+    fn get_raw_transaction_info(
+        &self,
+        tx_id: &Txid,
+    ) -> Result<GetRawTransactionResult, BitcoinClientError> {
+        let tx = self.client.get_raw_transaction_info(tx_id, None)?;
+        Ok(tx)
     }
 
     fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResult, BitcoinClientError> {
