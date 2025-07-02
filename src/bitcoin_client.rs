@@ -123,10 +123,15 @@ impl BitcoinClientApi for BitcoinClient {
 
         match estimate_fee {
             Ok(estimate) => {
-                // Returns estimate fee rate in BTC/vkB
                 match estimate.fee_rate {
                     Some(fee_rate) => {
-                        return Ok(fee_rate.to_sat());
+                        // The fee_rate returned by estimate_smart_fee is in units of BTC per kilobyte (BTC/vkB).
+                        // To convert this to satoshis per virtual byte (sat/vB), we need to:
+                        //   1. Convert BTC to satoshis by multiplying by 100,000,000 (fee_rate.to_sat()).
+                        //   2. Convert per kilobyte to per byte by dividing by 1,000.
+                        // So, the final formula is: (BTC_per_kB * 100_000_000) / 1_000 = sat/vB
+                        let fee_rate = (fee_rate.to_sat() / 1_000) as u64;
+                        return Ok(fee_rate);
                     }
                     None => {
                         return Ok(DEFAULT_FEE_RATE);
