@@ -19,6 +19,6 @@ It uses the [`bitcoincore-rpc`](https://crates.io/crates/bitcoincore-rpc) crate 
 - `get_tx_out(txid, vout)` - Get UTXO details.
 - `mine_blocks_to_address(num_blocks, address)` - Mine blocks to an address.
 - `invalidate_block(hash)` - Invalidate a block.
-- `init_wallet(network, wallet_name)` - Create and initialize a wallet.
+- `init_wallet(wallet_name)` - Create and initialize a wallet.
 - `get_new_address(pk, network)` - Generate a new address from a public key.
 - `estimate_smart_fee()` - Estimate transaction fee rate.
