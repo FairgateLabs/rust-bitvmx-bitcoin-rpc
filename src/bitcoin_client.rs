@@ -101,11 +101,7 @@ pub trait BitcoinClientApi {
 
     fn get_new_address(&self, pk: PublicKey, network: Network) -> Address;
 
-    fn init_wallet(
-        &self,
-        network: Network,
-        wallet_name: &str,
-    ) -> Result<Address, BitcoinClientError>;
+    fn init_wallet(&self, wallet_name: &str) -> Result<Address, BitcoinClientError>;
 
     fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError>;
 
@@ -299,17 +295,16 @@ impl BitcoinClientApi for BitcoinClient {
         address.clone().require_network(network).unwrap()
     }
 
-    fn init_wallet(
-        &self,
-        network: Network,
-        wallet_name: &str,
-    ) -> Result<Address, BitcoinClientError> {
+    fn init_wallet(&self, wallet_name: &str) -> Result<Address, BitcoinClientError> {
+        let blockchain_info = self.get_blockchain_info()?;
+
         let wallets =
             self.client
                 .list_wallets()
                 .map_err(|e| BitcoinClientError::FailedToListWallets {
                     error: e.to_string(),
                 })?;
+
         if !wallets.contains(&wallet_name.to_string()) {
             match self
                 .client
@@ -324,18 +319,18 @@ impl BitcoinClientApi for BitcoinClient {
             };
         }
 
-        let wallet = self
+        let address = self
             .client
             .get_new_address(None, None)
             .map_err(|e| BitcoinClientError::FailedToGetNewAddress {
                 error: e.to_string(),
             })?
-            .require_network(network)
+            .require_network(blockchain_info.chain)
             .map_err(|e| BitcoinClientError::FailedToGetNewAddress {
                 error: e.to_string(),
             })?;
 
-        Ok(wallet)
+        Ok(address)
     }
 
     fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError> {
@@ -367,12 +362,63 @@ mod tests {
 
         let blocks = bitcoin_client.get_best_block().unwrap();
         println!("Blocks: {:?}", blocks);
-        let wallet = bitcoin_client
-            .init_wallet(Network::Regtest, "test_wallet")
-            .unwrap();
+        let wallet = bitcoin_client.init_wallet("test_wallet").unwrap();
         bitcoin_client.mine_blocks_to_address(1, &wallet).unwrap();
 
         let blocks = bitcoin_client.get_best_block().unwrap();
         println!("Blocks: {:?}", blocks);
+    }
+
+    #[test]
+    #[ignore]
+    fn test_init_wallet() -> Result<(), BitcoinClientError> {
+        let bitcoin_client =
+            BitcoinClient::new("http://127.0.0.1:18443", "foo", "rpcpassword").unwrap();
+
+        // Use a unique wallet name to avoid collisions
+        let wallet_name = format!("test_wallet");
+        let network = Network::Regtest;
+
+        // Attempt to initialize the wallet
+        let result_address = bitcoin_client.init_wallet(&wallet_name);
+
+        println!("Result address: {:?}", result_address);
+        assert!(result_address.is_ok());
+        let address = result_address.unwrap();
+        println!("Address: {:?}", address);
+
+        // Attempt to initialize the wallet
+        let result_address_2 = bitcoin_client.init_wallet(&wallet_name);
+
+        assert!(result_address_2.is_ok());
+        let address_2 = result_address_2.unwrap();
+        assert_ne!(address, address_2);
+        println!("Address 2: {:?}", address_2);
+
+        // Init wallet with different name
+        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
+
+        println!("Result address 3: {:?}", result_address_3);
+        assert!(result_address_3.is_ok());
+        let address_3 = result_address_3.unwrap();
+        println!("Address 3: {:?}", address_3);
+
+        // Init wallet with different name
+        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
+
+        println!("Result address 3: {:?}", result_address_3);
+        assert!(result_address_3.is_ok());
+        let address_3 = result_address_3.unwrap();
+        println!("Address 3: {:?}", address_3);
+
+        // Init wallet with different name
+        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
+
+        println!("Result address 3: {:?}", result_address_3);
+        assert!(result_address_3.is_ok());
+        let address_3 = result_address_3.unwrap();
+        println!("Address 3: {:?}", address_3);
+
+        Ok(())
     }
 }
