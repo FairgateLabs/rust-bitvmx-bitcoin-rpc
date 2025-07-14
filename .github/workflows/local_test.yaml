@@ -15,7 +15,7 @@ jobs:
     uses: FairgateLabs/rust-bitvmx-workspace/.github/workflows/local_test_template.yml@main
     with:
       fetch-depth: 0
-      repo: 'FairgateLabs/rust-bitvmx-bitcoin-rpc'
+      repo: 'FairgateLabs/rust-bitvmx-workspace'
       submodule_path: 'rust-bitvmx-bitcoin-rpc'
       cargo_lock_path: 'rust-bitvmx-bitcoin-rpc/Cargo.lock'
       target_path: 'rust-bitvmx-bitcoin-rpc/target'
