@@ -3,6 +3,11 @@
 BitVMX Bitcoin RPC is a Rust library that provides a convenient interface for interacting with a Bitcoin Core node.
 It uses the [`bitcoincore-rpc`](https://crates.io/crates/bitcoincore-rpc) crate and provides additional abstractions and helper functions for easier interaction.
 
+## ⚠️ Disclaimer
+
+This library is currently under development and may not be fully stable.
+It is not production-ready, has not been audited, and future updates may introduce breaking changes without preserving backward compatibility.
+
 ## Methods
 
 - `BitcoinClient::new(url, user, pass)` - Connect to a Bitcoin Core node.
