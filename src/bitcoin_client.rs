@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use crate::errors::BitcoinClientError;
 use crate::reqwest_https::ReqwestHttpsTransport;
 use crate::rpc_config::RpcConfig;
@@ -92,6 +94,11 @@ pub trait BitcoinClientApi {
         &self,
         tx_id: &Txid,
     ) -> Result<GetRawTransactionResult, BitcoinClientError>;
+
+    fn mine_blocks(
+        &self,
+        block_num: u64,
+    ) -> Result<(), BitcoinClientError>;
 
     fn mine_blocks_to_address(
         &self,
@@ -267,6 +274,18 @@ impl BitcoinClientApi for BitcoinClient {
     fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError> {
         let tx = self.client.get_raw_transaction(txid, None).ok();
         Ok(tx)
+    }
+
+    fn mine_blocks(
+        &self,
+        block_num: u64,
+    ) -> Result<(), BitcoinClientError> {
+        // send to an empty address to avoid changing the balance of a wallet
+        let address = Address::from_str("mkHS9ne12qx9pS9VojpwU5xtRd4T7X7ZUt")?.require_network(Network::Regtest)?;
+
+        self.mine_blocks_to_address(block_num, &address)?;
+
+        Ok(())
     }
 
     fn mine_blocks_to_address(

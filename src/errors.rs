@@ -8,6 +8,9 @@ pub enum BitcoinClientError {
     #[error("Invalid block height")]
     InvalidHeight,
 
+    #[error("Error parsing address {0}")]
+    ParseAddressError(#[from] bitcoin::address::ParseError),
+
     #[error("Error creating client {0}")]
     NewClientError(#[from] reqwest_https::Error),
 
