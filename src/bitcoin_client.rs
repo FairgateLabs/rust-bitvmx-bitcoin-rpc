@@ -269,8 +269,8 @@ impl BitcoinClientApi for BitcoinClient {
         let result = self.client.send_raw_transaction(serialized_tx);
 
         match &result {
-            Ok(txid) => println!("[BitcoinClient] TX sent: {} (txid: {})", tx.txid(), txid),
-            Err(e) => println!("[BitcoinClient] Failed to send TX: {} - {:?}", tx.txid(), e),
+            Ok(txid) => println!("[BitcoinClient] TX sent: {} (txid: {})", tx.compute_txid(), txid),
+            Err(e) => println!("[BitcoinClient] Failed to send TX: {} - {:?}", tx.compute_txid(), e),
         }
 
         result.map_err(|e| BitcoinClientError::FailedToSendTransaction {
