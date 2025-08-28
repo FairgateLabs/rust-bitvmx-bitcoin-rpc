@@ -133,6 +133,11 @@ impl BitcoinClientApi for BitcoinClient {
             Ok(estimate) => {
                 match estimate.fee_rate {
                     Some(fee_rate) => {
+                        // The fee_rate returned by estimate_smart_fee is in units of BTC per kilobyte (BTC/vkB).
+                        // To convert this to satoshis per virtual byte (sat/vB), we need to:
+                        //   1. Convert BTC to satoshis by multiplying by 100,000,000 (fee_rate.to_sat()).
+                        //   2. Convert per kilobyte to per byte by dividing by 1,000.
+                        // So, the final formula is: (BTC_per_kB * 100_000_000) / 1_000 = sat/vB
                         let fee_rate = (fee_rate.to_sat() / 1_000) as u64;
                         println!("[BitcoinClient] Estimated smart fee: {} sat/vB", fee_rate);
                         return Ok(fee_rate);
@@ -425,5 +430,79 @@ impl BitcoinClientApi for BitcoinClient {
             })?;
         println!("[BitcoinClient] Dump privkey for {:?}: {}", address, wif);
         Ok(wif.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::Network;
+
+    #[test]
+    #[ignore]
+    fn mine_blocks_to_address_test() {
+        let bitcoin_client =
+            BitcoinClient::new("http://127.0.0.1:18443", "foo", "rpcpassword").unwrap();
+
+        let blocks = bitcoin_client.get_best_block().unwrap();
+        println!("Blocks: {:?}", blocks);
+        let wallet = bitcoin_client.init_wallet("test_wallet").unwrap();
+        bitcoin_client.mine_blocks_to_address(1, &wallet).unwrap();
+
+        let blocks = bitcoin_client.get_best_block().unwrap();
+        println!("Blocks: {:?}", blocks);
+    }
+
+    #[test]
+    #[ignore]
+    fn test_init_wallet() -> Result<(), BitcoinClientError> {
+        let bitcoin_client =
+            BitcoinClient::new("http://127.0.0.1:18443", "foo", "rpcpassword").unwrap();
+
+        // Use a unique wallet name to avoid collisions
+        let wallet_name = format!("test_wallet");
+        let network = Network::Regtest;
+
+        // Attempt to initialize the wallet
+        let result_address = bitcoin_client.init_wallet(&wallet_name);
+
+        println!("Result address: {:?}", result_address);
+        assert!(result_address.is_ok());
+        let address = result_address.unwrap();
+        println!("Address: {:?}", address);
+
+        // Attempt to initialize the wallet
+        let result_address_2 = bitcoin_client.init_wallet(&wallet_name);
+
+        assert!(result_address_2.is_ok());
+        let address_2 = result_address_2.unwrap();
+        assert_ne!(address, address_2);
+        println!("Address 2: {:?}", address_2);
+
+        // Init wallet with different name
+        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
+
+        println!("Result address 3: {:?}", result_address_3);
+        assert!(result_address_3.is_ok());
+        let address_3 = result_address_3.unwrap();
+        println!("Address 3: {:?}", address_3);
+
+        // Init wallet with different name
+        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
+
+        println!("Result address 3: {:?}", result_address_3);
+        assert!(result_address_3.is_ok());
+        let address_3 = result_address_3.unwrap();
+        println!("Address 3: {:?}", address_3);
+
+        // Init wallet with different name
+        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
+
+        println!("Result address 3: {:?}", result_address_3);
+        assert!(result_address_3.is_ok());
+        let address_3 = result_address_3.unwrap();
+        println!("Address 3: {:?}", address_3);
+
+        Ok(())
     }
 }
