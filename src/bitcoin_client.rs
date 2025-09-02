@@ -10,6 +10,7 @@ use bitcoincore_rpc::json::{EstimateMode, GetBlockchainInfoResult};
 use bitcoincore_rpc::json::{GetRawTransactionResult, GetTxOutResult};
 use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
+use tracing::{debug, info, error};
 
 #[derive(Debug)]
 pub struct BitcoinClient {
@@ -34,6 +35,8 @@ impl BitcoinClient {
 
         let from_jsonrpc = jsonrpc::client::Client::with_transport(transport);
         let client = Client::from_jsonrpc(from_jsonrpc);
+
+        info!("[BitcoinClient] Initialized for url: {}", url);
 
         Ok(Self { client })
     }
@@ -106,6 +109,21 @@ pub trait BitcoinClientApi {
     fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError>;
 
     fn estimate_smart_fee(&self) -> Result<u64, BitcoinClientError>;
+
+    #[cfg(feature = "testing")]
+    fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError>;
+
+    #[cfg(feature = "testing")]
+    fn get_block_count(&self) -> Result<u64, BitcoinClientError>;
+
+    #[cfg(feature = "testing")]
+    fn get_balance(&self) -> Result<Amount, BitcoinClientError>;
+
+    #[cfg(feature = "testing")]
+    fn list_wallets(&self) -> Result<Vec<String>, BitcoinClientError>;
+
+    #[cfg(feature = "testing")]
+    fn dump_privkey(&self, address: &Address) -> Result<String, BitcoinClientError>;
 }
 
 #[automock]
@@ -127,15 +145,17 @@ impl BitcoinClientApi for BitcoinClient {
                         //   2. Convert per kilobyte to per byte by dividing by 1,000.
                         // So, the final formula is: (BTC_per_kB * 100_000_000) / 1_000 = sat/vB
                         let fee_rate = (fee_rate.to_sat() / 1_000) as u64;
+                        debug!("Estimated smart fee: {} sat/vB", fee_rate);
                         return Ok(fee_rate);
                     }
                     None => {
+                        debug!("Estimated smart fee not available, using default: {} sat/vB", DEFAULT_FEE_RATE);
                         return Ok(DEFAULT_FEE_RATE);
                     }
                 }
             }
             Err(error) => {
-                // Handle the error returned by estimate_smart_fee
+                error!("Error estimating smart fee: {:?}", error);
                 return Err(BitcoinClientError::RpcError(error));
             }
         }
@@ -143,7 +163,9 @@ impl BitcoinClientApi for BitcoinClient {
 
     fn tx_exists(&self, tx_id: &Txid) -> bool {
         let tx = self.client.get_raw_transaction_info(tx_id, None);
-        tx.is_ok()
+        let exists = tx.is_ok();
+        debug!("tx_exists({}): {}", tx_id, exists);
+        exists
     }
 
     fn get_raw_transaction_info(
@@ -151,16 +173,19 @@ impl BitcoinClientApi for BitcoinClient {
         tx_id: &Txid,
     ) -> Result<GetRawTransactionResult, BitcoinClientError> {
         let tx = self.client.get_raw_transaction_info(tx_id, None)?;
+        debug!("get_raw_transaction_info({}) -> found: {}", tx_id, tx.txid == *tx_id);
         Ok(tx)
     }
 
     fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResult, BitcoinClientError> {
         let blockchain_info = self.client.get_blockchain_info()?;
+        debug!("Blockchain info: height={}, chain={}", blockchain_info.blocks, blockchain_info.chain);
         Ok(blockchain_info)
     }
 
     fn get_best_block(&self) -> Result<BlockHeight, BitcoinClientError> {
         let block_height = self.client.get_block_count()?;
+        debug!("Best block height: {}", block_height);
         Ok(block_height as u32)
     }
 
@@ -176,9 +201,9 @@ impl BitcoinClientApi for BitcoinClient {
             hash: block_hash,
             height: *height,
             prev_hash: block.header.prev_blockhash,
-            txs: block.txdata,
+            txs: block.txdata.clone(),
         };
-
+        debug!("Block at height {}: hash={}", height, block_hash);
         Ok(Some(block_info))
     }
 
@@ -187,16 +212,19 @@ impl BitcoinClientApi for BitcoinClient {
         height: &BlockHeight,
     ) -> Result<BlockHash, BitcoinClientError> {
         let block_hash = self.client.get_block_hash(u64::from(*height))?;
+        debug!("Block hash at height {}: {}", height, block_hash);
         Ok(block_hash)
     }
 
     fn get_block_by_hash(&self, hash: &BlockHash) -> Result<Block, BitcoinClientError> {
         let block = self.client.get_by_id(hash)?;
+        debug!("Block for hash {}: loaded", hash);
         Ok(block)
     }
 
     fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError> {
         let tx_out_result = self.client.get_tx_out(txid, vout, Some(false))?;
+        debug!("get_tx_out({}, {}) -> found: {}", txid, vout, tx_out_result.is_some());
         tx_out_result.ok_or(BitcoinClientError::FailedToGetTxOutput {
             error: "Tx output not found".to_string(),
         })
@@ -213,7 +241,6 @@ impl BitcoinClientApi for BitcoinClient {
             return Err(BitcoinClientError::InvalidNetwork);
         }
 
-        // send BTC to address
         let txid = self
             .client
             .send_to_address(address, amount, None, None, None, None, None, None)
@@ -221,10 +248,10 @@ impl BitcoinClientApi for BitcoinClient {
                 error: e.to_string(),
             })?;
 
-        // mine a block to confirm transaction
+        info!("Funded address {:?} with {} sats (txid: {})", address, amount.to_sat(), txid);
+
         self.mine_blocks_to_address(1, address)?;
 
-        // get transaction details
         let tx_info = self
             .client
             .get_transaction(&txid, Some(true))
@@ -252,20 +279,19 @@ impl BitcoinClientApi for BitcoinClient {
 
         let result = self.client.send_raw_transaction(serialized_tx);
 
-        if let Err(e) = result {
-            println!("Error: {:?}", e);
-            return Err(BitcoinClientError::FailedToSendTransaction {
-                error: e.to_string(),
-            });
+        match &result {
+            Ok(txid) => info!("TX sent: {} (txid: {})", tx.compute_txid(), txid),
+            Err(e) => error!("Failed to send TX: {} - {:?}", tx.compute_txid(), e),
         }
 
-        let txid = result.unwrap();
-
-        Ok(txid)
+        result.map_err(|e| BitcoinClientError::FailedToSendTransaction {
+            error: e.to_string(),
+        })
     }
 
     fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError> {
         let tx = self.client.get_raw_transaction(txid, None).ok();
+        debug!("get_transaction({}) -> found: {}", txid, tx.is_some());
         Ok(tx)
     }
 
@@ -274,6 +300,7 @@ impl BitcoinClientApi for BitcoinClient {
         block_num: u64,
         address: &Address,
     ) -> Result<(), BitcoinClientError> {
+        let before = self.client.get_block_count().unwrap_or(0);
         let blockchain_info = self.get_blockchain_info()?;
 
         if blockchain_info.chain != Network::Regtest {
@@ -286,12 +313,16 @@ impl BitcoinClientApi for BitcoinClient {
                 error: e.to_string(),
             })?;
 
+        let after = self.client.get_block_count().unwrap_or(0);
+        info!("Mined {} blocks (height: {} -> {})", block_num, before, after);
+
         Ok(())
     }
 
     fn get_new_address(&self, pk: PublicKey, network: Network) -> Address {
         let compressed = CompressedPublicKey::try_from(pk).unwrap();
         let address = Address::p2wpkh(&compressed, network).as_unchecked().clone();
+        debug!("New address for network {:?}: {:?}", network, address);
         address.clone().require_network(network).unwrap()
     }
 
@@ -310,13 +341,19 @@ impl BitcoinClientApi for BitcoinClient {
                 .client
                 .create_wallet(wallet_name, None, None, None, None)
             {
-                Ok(r) => r,
+                Ok(r) => {
+                    info!("Created wallet: {}", wallet_name);
+                    r
+                }
                 Err(e) => {
+                    error!("Failed to create wallet {}: {:?}", wallet_name, e);
                     return Err(BitcoinClientError::FailedToCreateWallet {
                         error: e.to_string(),
                     })
                 }
             };
+        } else {
+            info!("Wallet already exists: {}", wallet_name);
         }
 
         let address = self
@@ -330,6 +367,7 @@ impl BitcoinClientApi for BitcoinClient {
                 error: e.to_string(),
             })?;
 
+        info!("New address from wallet {}: {}", wallet_name, address);
         Ok(address)
     }
 
@@ -341,11 +379,68 @@ impl BitcoinClientApi for BitcoinClient {
         }
 
         self.client.invalidate_block(hash).map_err(|e| {
+            error!("Failed to invalidate block {}: {:?}", hash, e);
             BitcoinClientError::FailedToInvalidateBlock {
                 error: e.to_string(),
             }
         })?;
+        info!("Invalidated block: {}", hash);
         Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError> {
+        let txids = self.client.get_raw_mempool()
+            .map_err(|e| {
+                error!("Error get_raw_mempool: {:?}", e);
+                BitcoinClientError::RpcError(e)
+            })?;
+        debug!("Raw mempool: {:?}", txids);
+        Ok(txids)
+    }
+
+    #[cfg(feature = "testing")]
+    fn get_block_count(&self) -> Result<u64, BitcoinClientError> {
+        let count = self.client.get_block_count()
+            .map_err(|e| {
+                error!("Error get_block_count: {:?}", e);
+                BitcoinClientError::RpcError(e)
+            })?;
+        debug!("Block count: {}", count);
+        Ok(count)
+    }
+
+    #[cfg(feature = "testing")]
+    fn get_balance(&self) -> Result<Amount, BitcoinClientError> {
+        let balance = self.client.get_balance(None, None)
+            .map_err(|e| {
+                error!("Error get_balance: {:?}", e);
+                BitcoinClientError::RpcError(e)
+            })?;
+        debug!("Wallet balance: {} BTC", balance.to_btc());
+        Ok(balance)
+    }
+
+    #[cfg(feature = "testing")]
+    fn list_wallets(&self) -> Result<Vec<String>, BitcoinClientError> {
+        let wallets = self.client.list_wallets()
+            .map_err(|e| {
+                error!("Error list_wallets: {:?}", e);
+                BitcoinClientError::RpcError(e)
+            })?;
+        debug!("Wallets: {:?}", wallets);
+        Ok(wallets)
+    }
+
+    #[cfg(feature = "testing")]
+    fn dump_privkey(&self, address: &Address) -> Result<String, BitcoinClientError> {
+        let wif = self.client.dump_private_key(address)
+            .map_err(|e| {
+                error!("Error dump_privkey: {:?}", e);
+                BitcoinClientError::RpcError(e)
+            })?;
+        debug!("Dump privkey for {:?}: {}", address, wif);
+        Ok(wif.to_string())
     }
 }
 
@@ -377,7 +472,6 @@ mod tests {
 
         // Use a unique wallet name to avoid collisions
         let wallet_name = format!("test_wallet");
-        let network = Network::Regtest;
 
         // Attempt to initialize the wallet
         let result_address = bitcoin_client.init_wallet(&wallet_name);
