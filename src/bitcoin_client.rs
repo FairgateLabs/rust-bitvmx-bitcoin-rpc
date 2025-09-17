@@ -113,6 +113,8 @@ pub trait BitcoinClientApi {
 
     fn init_wallet(&self, wallet_name: &str) -> Result<Address, BitcoinClientError>;
 
+    fn create_wallet_only(&self, wallet_name: &str) -> Result<(), BitcoinClientError>;
+
     fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError>;
 
     fn estimate_smart_fee(&self) -> Result<u64, BitcoinClientError>;
@@ -388,6 +390,36 @@ impl BitcoinClientApi for BitcoinClient {
 
         info!("New address from wallet {}: {}", wallet_name, address);
         Ok(address)
+    }
+
+    fn create_wallet_only(&self, wallet_name: &str) -> Result<(), BitcoinClientError> {
+        let wallets =
+            self.client
+                .list_wallets()
+                .map_err(|e| BitcoinClientError::FailedToListWallets {
+                    error: e.to_string(),
+                })?;
+
+        if !wallets.contains(&wallet_name.to_string()) {
+            match self
+                .client
+                .create_wallet(wallet_name, None, None, None, None)
+            {
+                Ok(_) => {
+                    info!("Created wallet: {}", wallet_name);
+                }
+                Err(e) => {
+                    error!("Failed to create wallet {}: {:?}", wallet_name, e);
+                    return Err(BitcoinClientError::FailedToCreateWallet {
+                        error: e.to_string(),
+                    })
+                }
+            };
+        } else {
+            info!("Wallet already exists: {}", wallet_name);
+        }
+
+        Ok(())
     }
 
     fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError> {
