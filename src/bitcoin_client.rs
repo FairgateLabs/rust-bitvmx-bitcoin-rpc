@@ -98,6 +98,11 @@ pub trait BitcoinClientApi {
         tx_id: &Txid,
     ) -> Result<GetRawTransactionResult, BitcoinClientError>;
 
+    fn get_raw_transaction_verbosity_two(
+        &self,
+        tx_id: &Txid,
+    ) -> Result<serde_json::Value, BitcoinClientError>;
+
     fn mine_blocks(
         &self,
         block_num: u64,
@@ -183,6 +188,32 @@ impl BitcoinClientApi for BitcoinClient {
     ) -> Result<GetRawTransactionResult, BitcoinClientError> {
         let tx = self.client.get_raw_transaction_info(tx_id, None)?;
         debug!("get_raw_transaction_info({}) -> found: {}", tx_id, tx.txid == *tx_id);
+        Ok(tx)
+    }
+
+    fn get_raw_transaction_verbosity_two(
+        &self,
+        tx_id: &Txid,
+    ) -> Result<serde_json::Value, BitcoinClientError> {
+        // TODO update this implementation when bitcoincore-rpc supports verbosity two raw tx natively
+        // Requires Bitcoin Core 25.0.0 or higher
+        // See https://bitcoincore.org/en/doc/25.0.0/rpc/rawtransactions/getrawtransaction/
+
+        let tx_id_str = tx_id.to_string();
+        let verbosity = 2;
+        let block_hash: Option<String> = None;
+
+        let args = vec![
+            serde_json::Value::String(tx_id_str),
+            serde_json::Value::Number(serde_json::Number::from(verbosity)),
+            match block_hash {
+                Some(hash) => serde_json::Value::String(hash),
+                None => serde_json::Value::Null,
+            }
+        ];
+
+        let tx: serde_json::Value = self.client.call("getrawtransaction", &args)?;
+        debug!("get_raw_transaction_verbosity_two({}) -> found: {}", tx_id, tx.get("txid").map_or(false, |v| v.as_str() == Some(&tx_id.to_string())));
         Ok(tx)
     }
 
@@ -498,7 +529,6 @@ impl BitcoinClientApi for BitcoinClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::Network;
 
     #[test]
     #[ignore]
