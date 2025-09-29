@@ -65,7 +65,7 @@ impl ReqwestHttpsTransport {
         }
 
         let response = request.send()?;
-        
+
         if !response.status().is_success() {
             return Err(Error::Http(HttpError {
                 status_code: response.status().as_u16() as i32,
@@ -221,4 +221,4 @@ impl From<Error> for jsonrpc::Error {
             e => jsonrpc::Error::Transport(Box::new(e)),
         }
     }
-} 
+}
