@@ -38,7 +38,10 @@ impl BitcoinClient {
         let from_jsonrpc = jsonrpc::client::Client::with_transport(transport);
         let client = Client::from_jsonrpc(from_jsonrpc);
 
-        info!("[BitcoinClient] Initialized for url: {}", mask_url_secrets(url));
+        info!(
+            "[BitcoinClient] Initialized for url: {}",
+            mask_url_secrets(url)
+        );
 
         Ok(Self { client })
     }
@@ -571,7 +574,8 @@ fn is_potential_secret(s: &str) -> bool {
     }
 
     // Skip common URL components
-    if matches!(s.to_lowercase().as_str(),
+    if matches!(
+        s.to_lowercase().as_str(),
         "http" | "https" | "localhost" | "127.0.0.1" | "wallet" | "bitcoin" | "rpc" | "api"
     ) {
         return false;
@@ -613,7 +617,8 @@ mod tests {
         assert_eq!(masked_normal, normal_url);
 
         // Test URL with query parameter secret
-        let url_with_query_secret = "http://localhost:8332?token=abc123def456789012345678901234567890abcd";
+        let url_with_query_secret =
+            "http://localhost:8332?token=abc123def456789012345678901234567890abcd";
         let masked_query = mask_url_secrets(url_with_query_secret);
         assert!(!masked_query.contains("abc123def456789012345678901234567890abcd"));
         assert!(masked_query.contains("*"));
@@ -622,10 +627,14 @@ mod tests {
     #[test]
     fn test_is_potential_secret() {
         // Test hex secret (like the example in the prompt)
-        assert!(is_potential_secret("7822107bcd2054574934586c276a46f0d3eca5e2"));
+        assert!(is_potential_secret(
+            "7822107bcd2054574934586c276a46f0d3eca5e2"
+        ));
 
         // Test base64-like secret
-        assert!(is_potential_secret("YWJjMTIzZGVmNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkw"));
+        assert!(is_potential_secret(
+            "YWJjMTIzZGVmNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkw"
+        ));
 
         // Test normal words/components
         assert!(!is_potential_secret("localhost"));
