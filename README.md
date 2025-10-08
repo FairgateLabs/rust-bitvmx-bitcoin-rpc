@@ -18,6 +18,7 @@ It is not production-ready, has not been audited, and future updates may introdu
 - `get_blockchain_info()` - Get blockchain info.
 - `tx_exists(txid)` - Check if a transaction exists.
 - `get_raw_transaction_info(txid)` - Get raw transaction details.
+- `get_raw_transaction_verbosity_two(txid)` - Get raw transaction with verbosity=2 details. *requires Bitcoin Core version 25.0.0 or higher*
 - `get_transaction(txid)` - Get transaction by txid.
 - `send_transaction(tx)` - Send a raw transaction.
 - `fund_address(address, amount)` - Fund an address.
@@ -44,7 +45,7 @@ let client = BitcoinClient::new(
 ```
 
 #### Getting basic blockchain data
-```rust 
+```rust
 let height = client.get_best_block()?;
 
 let info = client.get_blockchain_info()?;
@@ -58,7 +59,7 @@ let block = client.get_block_by_hash(&block_hash)?;
 ```
 
 #### Sending and retrieving transactions
-```rust 
+```rust
 let address = Address::from_str("bcrt1...")?;
 let amount = Amount::from_sat(10_000);
 
@@ -70,19 +71,19 @@ let exists = client.tx_exists(&txid);
 ```
 
 #### Wallet operations
-```rust 
+```rust
 let address = client.init_wallet("test_wallet")?;
 
 let new_address = client.get_new_address(public_key, bitcoin::Network::Regtest);
 ```
 
 #### Mining blocks (regtest only)
-```rust 
+```rust
 client.mine_blocks_to_address(1, &address)?;
 ```
 
 #### Estimating fees
-```rust 
+```rust
 let fee_rate = client.estimate_smart_fee()?
 ```
 
