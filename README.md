@@ -74,7 +74,7 @@ let exists = client.tx_exists(&txid);
 ```rust
 let address = client.init_wallet("test_wallet")?;
 
-let new_address = client.get_new_address(public_key, bitcoin::Network::Regtest);
+let new_address = client.get_new_address(public_key, bitcoin::Network::Regtest)?;
 ```
 
 #### Mining blocks (regtest only)

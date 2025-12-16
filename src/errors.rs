@@ -52,4 +52,7 @@ pub enum BitcoinClientError {
 
     #[error("Failed to invalidate block {error}")]
     FailedToInvalidateBlock { error: String },
+
+    #[error("Failed to convert PublicKey to CompressedPublicKey: {error}")]
+    FailedToConvertPublicKey{ error: String }
 }
