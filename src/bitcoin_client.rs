@@ -31,31 +31,33 @@ impl BitcoinClient {
             false => Some(pass),
         };
 
-        let transport = ReqwestHttpsTransport::builder()
-            .url(url.expose_secret())?
-            .basic_auth(
-                user.expose_secret().to_owned(),
-                pass.map(|p| p.expose_secret().to_owned()),
-            )
-            .build();
+        let transport = if !user.expose_secret().is_empty() {
+            ReqwestHttpsTransport::builder()
+                .url(url.expose_secret())?
+                .basic_auth(
+                    user.expose_secret().to_owned(),
+                    pass.map(|p| p.expose_secret().to_owned()),
+                )
+                .build()
+        } else {
+            ReqwestHttpsTransport::builder()
+                .url(url.expose_secret())?
+                .build()
+        };
 
         let from_jsonrpc = jsonrpc::client::Client::with_transport(transport);
         let client = Client::from_jsonrpc(from_jsonrpc);
 
         info!(
             "[BitcoinClient] Initialized for url: {}",
-            mask_url_secrets(&url.expose_secret())
+            mask_url_secrets(url.expose_secret())
         );
 
         Ok(Self { client })
     }
 
     pub fn new_from_config(config: &RpcConfig) -> Result<Self, BitcoinClientError> {
-        Self::new(
-            &config.url.clone(),
-            &config.username.to_owned(),
-            &config.password.clone(),
-        )
+        Self::new(&config.url, &config.username, &config.password)
     }
 
     pub fn new_with_wallet(
@@ -70,7 +72,7 @@ impl BitcoinClient {
             url.expose_secret().to_string()
         };
 
-        Self::new(&Secret::new(url), &user, &pass)
+        Self::new(&Secret::new(url), user, pass)
     }
 }
 
