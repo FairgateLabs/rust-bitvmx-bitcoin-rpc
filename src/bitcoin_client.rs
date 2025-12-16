@@ -22,23 +22,22 @@ pub struct BitcoinClient {
 
 impl BitcoinClient {
     pub fn new(
-        url: Secret<String>,
-        user: Secret<String>,
-        pass: Option<Secret<String>>,
+        url: &Secret<String>,
+        user: &Secret<String>,
+        pass: &Secret<String>,
     ) -> Result<Self, BitcoinClientError> {
-        let transport = if !user.expose_secret().is_empty() {
-            ReqwestHttpsTransport::builder()
-                .url(url.expose_secret())?
-                .basic_auth(
-                    user.expose_secret().to_owned(),
-                    pass.map(|p| p.expose_secret().to_owned()),
-                )
-                .build()
-        } else {
-            ReqwestHttpsTransport::builder()
-                .url(url.expose_secret())?
-                .build()
+        let pass = match pass.expose_secret().is_empty() {
+            true => None,
+            false => Some(pass),
         };
+
+        let transport = ReqwestHttpsTransport::builder()
+            .url(url.expose_secret())?
+            .basic_auth(
+                user.expose_secret().to_owned(),
+                pass.map(|p| p.expose_secret().to_owned()),
+            )
+            .build();
 
         let from_jsonrpc = jsonrpc::client::Client::with_transport(transport);
         let client = Client::from_jsonrpc(from_jsonrpc);
@@ -53,16 +52,16 @@ impl BitcoinClient {
 
     pub fn new_from_config(config: &RpcConfig) -> Result<Self, BitcoinClientError> {
         Self::new(
-            config.url.clone(),
-            config.username.to_owned(),
-            Some(config.password.to_owned()),
+            &config.url.clone(),
+            &config.username.to_owned(),
+            &config.password.clone(),
         )
     }
 
     pub fn new_with_wallet(
-        url: Secret<String>,
-        user: Secret<String>,
-        pass: Secret<String>,
+        url: &Secret<String>,
+        user: &Secret<String>,
+        pass: &Secret<String>,
         wallet_name: &str,
     ) -> Result<Self, BitcoinClientError> {
         let url = if !wallet_name.is_empty() {
@@ -71,7 +70,7 @@ impl BitcoinClient {
             url.expose_secret().to_string()
         };
 
-        Self::new(Secret::new(url), user, Some(pass))
+        Self::new(&Secret::new(url), &user, &pass)
     }
 }
 
@@ -660,9 +659,9 @@ mod tests {
     #[ignore]
     fn mine_blocks_to_address_test() {
         let bitcoin_client = BitcoinClient::new(
-            Secret::new("http://127.0.0.1:18443".to_string()),
-            Secret::new("foo".to_string()),
-            Some(Secret::new("rpcpassword".to_string())),
+            &Secret::new("http://127.0.0.1:18443".to_string()),
+            &Secret::new("foo".to_string()),
+            &Secret::new("rpcpassword".to_string()),
         )
         .unwrap();
 
@@ -679,9 +678,9 @@ mod tests {
     #[ignore]
     fn test_init_wallet() -> Result<(), BitcoinClientError> {
         let bitcoin_client = BitcoinClient::new(
-            Secret::new("http://127.0.0.1:18443".to_string()),
-            Secret::new("foo".to_string()),
-            Some(Secret::new("rpcpassword".to_string())),
+            &Secret::new("http://127.0.0.1:18443".to_string()),
+            &Secret::new("foo".to_string()),
+            &Secret::new("rpcpassword".to_string()),
         )
         .unwrap();
 
