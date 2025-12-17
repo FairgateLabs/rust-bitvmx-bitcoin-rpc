@@ -333,7 +333,9 @@ impl BitcoinClientApi for BitcoinClient {
         let vout = tx_info
             .details
             .first()
-            .expect("No details found for transaction")
+            .ok_or(BitcoinClientError::FailedToGetTransactionDetails {
+                error: "No transaction details found".to_string(),
+            })?
             .vout;
 
         Ok((tx, vout))
