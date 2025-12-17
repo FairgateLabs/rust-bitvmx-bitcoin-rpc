@@ -1,12 +1,13 @@
 use bitcoin::Network;
+use redact::Secret;
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RpcConfig {
     pub network: Network,
-    pub url: String,
-    pub username: String,
-    pub password: String,
+    pub url: Secret<String>,
+    pub username: Secret<String>,
+    pub password: Secret<String>,
     pub wallet: String,
 }
 
@@ -20,9 +21,9 @@ impl RpcConfig {
     ) -> Self {
         Self {
             network,
-            url,
-            username,
-            password,
+            url: Secret::new(url),
+            username: Secret::new(username),
+            password: Secret::new(password),
             wallet,
         }
     }
