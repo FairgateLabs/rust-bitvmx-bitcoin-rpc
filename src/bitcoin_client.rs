@@ -124,7 +124,7 @@ pub trait BitcoinClientApi {
         address: &Address,
     ) -> Result<(), BitcoinClientError>;
 
-    fn get_new_address(&self, pk: PublicKey, network: Network) -> Address;
+    fn get_new_address(&self, pk: PublicKey, network: Network) -> Result<Address, BitcoinClientError>;
 
     fn init_wallet(&self, wallet_name: &str) -> Result<Address, BitcoinClientError>;
 
@@ -407,11 +407,12 @@ impl BitcoinClientApi for BitcoinClient {
         Ok(())
     }
 
-    fn get_new_address(&self, pk: PublicKey, network: Network) -> Address {
-        let compressed = CompressedPublicKey::try_from(pk).unwrap();
+    fn get_new_address(&self, pk: PublicKey, network: Network) -> Result<Address, BitcoinClientError> {
+        let compressed = CompressedPublicKey::try_from(pk)
+            .map_err(|e| BitcoinClientError::FailedToConvertPublicKey { error: e.to_string() })?;
         let address = Address::p2wpkh(&compressed, network).as_unchecked().clone();
         debug!("New address for network {:?}: {:?}", network, address);
-        address.clone().require_network(network).unwrap()
+        Ok(address.clone().require_network(network).unwrap())
     }
 
     fn init_wallet(&self, wallet_name: &str) -> Result<Address, BitcoinClientError> {
