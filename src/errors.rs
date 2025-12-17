@@ -53,6 +53,9 @@ pub enum BitcoinClientError {
     #[error("Failed to invalidate block {error}")]
     FailedToInvalidateBlock { error: String },
 
+    #[error("Invalid wallet name: {wallet_name}")]
+    InvalidWalletName { wallet_name: String },
+  
     #[error("Failed to convert PublicKey to CompressedPublicKey: {error}")]
     FailedToConvertPublicKey{ error: String }
 }

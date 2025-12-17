@@ -67,6 +67,12 @@ impl BitcoinClient {
         wallet_name: &str,
     ) -> Result<Self, BitcoinClientError> {
         let url = if !wallet_name.is_empty() {
+            if !wallet_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                return Err(BitcoinClientError::InvalidWalletName {
+                    wallet_name: wallet_name.to_string(),
+                });
+            }
+            
             format!("{}/wallet/{}", url.expose_secret(), wallet_name)
         } else {
             url.expose_secret().to_string()
