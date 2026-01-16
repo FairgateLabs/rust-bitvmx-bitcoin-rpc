@@ -9,7 +9,7 @@ use bitcoin::{
     Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PublicKey, Transaction, Txid,
 };
 use bitcoincore_rpc::json::{EstimateMode, GetBlockchainInfoResult};
-use bitcoincore_rpc::json::{GetRawTransactionResult, GetTxOutResult};
+use bitcoincore_rpc::json::{GetMempoolEntryResult, GetRawTransactionResult, GetTxOutResult};
 use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
 use redact::Secret;
@@ -67,12 +67,15 @@ impl BitcoinClient {
         wallet_name: &str,
     ) -> Result<Self, BitcoinClientError> {
         let url = if !wallet_name.is_empty() {
-            if !wallet_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            if !wallet_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
                 return Err(BitcoinClientError::InvalidWalletName {
                     wallet_name: wallet_name.to_string(),
                 });
             }
-            
+
             format!("{}/wallet/{}", url.expose_secret(), wallet_name)
         } else {
             url.expose_secret().to_string()
@@ -130,7 +133,11 @@ pub trait BitcoinClientApi {
         address: &Address,
     ) -> Result<(), BitcoinClientError>;
 
-    fn get_new_address(&self, pk: PublicKey, network: Network) -> Result<Address, BitcoinClientError>;
+    fn get_new_address(
+        &self,
+        pk: PublicKey,
+        network: Network,
+    ) -> Result<Address, BitcoinClientError>;
 
     fn init_wallet(&self, wallet_name: &str) -> Result<Address, BitcoinClientError>;
 
@@ -139,6 +146,8 @@ pub trait BitcoinClientApi {
     fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError>;
 
     fn estimate_smart_fee(&self) -> Result<u64, BitcoinClientError>;
+
+    fn get_mempool_entry(&self, txid: &Txid) -> Result<GetMempoolEntryResult, BitcoinClientError>;
 
     #[cfg(feature = "testing")]
     fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError>;
@@ -415,9 +424,16 @@ impl BitcoinClientApi for BitcoinClient {
         Ok(())
     }
 
-    fn get_new_address(&self, pk: PublicKey, network: Network) -> Result<Address, BitcoinClientError> {
-        let compressed = CompressedPublicKey::try_from(pk)
-            .map_err(|e| BitcoinClientError::FailedToConvertPublicKey { error: e.to_string() })?;
+    fn get_new_address(
+        &self,
+        pk: PublicKey,
+        network: Network,
+    ) -> Result<Address, BitcoinClientError> {
+        let compressed = CompressedPublicKey::try_from(pk).map_err(|e| {
+            BitcoinClientError::FailedToConvertPublicKey {
+                error: e.to_string(),
+            }
+        })?;
         let address = Address::p2wpkh(&compressed, network).as_unchecked().clone();
         debug!("New address for network {:?}: {:?}", network, address);
         Ok(address.clone().require_network(network).unwrap())
@@ -513,6 +529,20 @@ impl BitcoinClientApi for BitcoinClient {
         })?;
         info!("Invalidated block: {}", hash);
         Ok(())
+    }
+
+    fn get_mempool_entry(&self, txid: &Txid) -> Result<GetMempoolEntryResult, BitcoinClientError> {
+        let txid_str = txid.to_string();
+        let args = vec![serde_json::Value::String(txid_str)];
+
+        let entry: GetMempoolEntryResult =
+            self.client.call("getmempoolentry", &args).map_err(|e| {
+                error!("Error getmempoolentry for {}: {:?}", txid, e);
+                BitcoinClientError::RpcError(e)
+            })?;
+
+        debug!("getmempoolentry({}) -> height: {}", txid, entry.height);
+        Ok(entry)
     }
 
     #[cfg(feature = "testing")]
