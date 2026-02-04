@@ -26,5 +26,4 @@ jobs:
       submodule_path: 'rust-bitvmx-bitcoin-rpc'
       cargo_lock_path: 'rust-bitvmx-bitcoin-rpc/Cargo.lock'
       target_path: 'rust-bitvmx-bitcoin-rpc/target'
-      submodule_branches: '{}'
     secrets: inherit
