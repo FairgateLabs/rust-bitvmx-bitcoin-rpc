@@ -149,6 +149,8 @@ pub trait BitcoinClientApi {
 
     fn get_mempool_entry(&self, txid: &Txid) -> Result<GetMempoolEntryResult, BitcoinClientError>;
 
+    fn check_in_mempool(&self, txid: &Txid) -> bool;
+
     #[cfg(feature = "testing")]
     fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError>;
 
@@ -543,6 +545,24 @@ impl BitcoinClientApi for BitcoinClient {
 
         debug!("getmempoolentry({}) -> height: {}", txid, entry.height);
         Ok(entry)
+    }
+
+    /// Returns `true` if the transaction is currently in the mempool, `false`
+    /// otherwise.  Unlike `get_mempool_entry`, this never logs at ERROR level
+    /// TODO: remove `get_mempool_entry` if not used anywhere else
+    fn check_in_mempool(&self, txid: &Txid) -> bool {
+        let txid_str = txid.to_string();
+        let args = vec![serde_json::Value::String(txid_str)];
+        match self
+            .client
+            .call::<GetMempoolEntryResult>("getmempoolentry", &args)
+        {
+            Ok(_) => true,
+            Err(e) => {
+                debug!("check_in_mempool({}): not present — {:?}", txid, e);
+                false
+            }
+        }
     }
 
     #[cfg(feature = "testing")]
