@@ -13,7 +13,7 @@ use bitcoincore_rpc::json::{GetMempoolEntryResult, GetRawTransactionResult, GetT
 use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
 use redact::Secret;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 pub struct BitcoinClient {
@@ -105,6 +105,9 @@ pub trait BitcoinClientApi {
 
     fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError>;
 
+    /// Real-time check. Returns true iff the UTXO is unspent in the UTXO set or mempool.
+    fn is_utxo_unspent(&self, txid: &Txid, vout: u32) -> Result<bool, BitcoinClientError>;
+
     fn fund_address(
         &self,
         address: &Address,
@@ -147,7 +150,12 @@ pub trait BitcoinClientApi {
 
     fn estimate_smart_fee(&self) -> Result<u64, BitcoinClientError>;
 
-    fn get_mempool_entry(&self, txid: &Txid) -> Result<GetMempoolEntryResult, BitcoinClientError>;
+    fn get_mempool_entry(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<GetMempoolEntryResult>, BitcoinClientError>;
+
+    fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError>;
 
     fn check_in_mempool(&self, txid: &Txid) -> bool;
 
@@ -315,6 +323,18 @@ impl BitcoinClientApi for BitcoinClient {
         tx_out_result.ok_or(BitcoinClientError::FailedToGetTxOutput {
             error: "Tx output not found".to_string(),
         })
+    }
+
+    fn is_utxo_unspent(&self, txid: &Txid, vout: u32) -> Result<bool, BitcoinClientError> {
+        // include_mempool=true → returns Some for outputs unspent in chain OR mempool.
+        let tx_out_result = self.client.get_tx_out(txid, vout, Some(true))?;
+        debug!(
+            "is_utxo_unspent({}, {}) -> {}",
+            txid,
+            vout,
+            tx_out_result.is_some()
+        );
+        Ok(tx_out_result.is_some())
     }
 
     fn fund_address(
@@ -533,46 +553,85 @@ impl BitcoinClientApi for BitcoinClient {
         Ok(())
     }
 
-    fn get_mempool_entry(&self, txid: &Txid) -> Result<GetMempoolEntryResult, BitcoinClientError> {
+    /// Returns the mempool entry for `txid` if the transaction is currently in the node's mempool.
+    ///
+    /// Returns:
+    /// - `Ok(Some(entry))` if the transaction is present in the mempool.
+    /// - `Ok(None)` if the transaction is not present in the mempool.
+    /// - `Err(...)` for transport, RPC, serialization, or other unexpected errors.
+    fn get_mempool_entry(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<GetMempoolEntryResult>, BitcoinClientError> {
         let txid_str = txid.to_string();
         let args = vec![serde_json::Value::String(txid_str)];
 
-        let entry: GetMempoolEntryResult =
-            self.client.call("getmempoolentry", &args).map_err(|e| {
-                error!("Error getmempoolentry for {}: {:?}", txid, e);
-                BitcoinClientError::RpcError(e)
-            })?;
-
-        debug!("getmempoolentry({}) -> height: {}", txid, entry.height);
-        Ok(entry)
-    }
-
-    /// Returns `true` if the transaction is currently in the mempool, `false`
-    /// otherwise.  Unlike `get_mempool_entry`, this never logs at ERROR level
-    /// TODO: remove `get_mempool_entry` if not used anywhere else
-    fn check_in_mempool(&self, txid: &Txid) -> bool {
-        let txid_str = txid.to_string();
-        let args = vec![serde_json::Value::String(txid_str)];
         match self
             .client
             .call::<GetMempoolEntryResult>("getmempoolentry", &args)
         {
-            Ok(_) => true,
+            Ok(entry) => {
+                debug!("getmempoolentry({}) -> height: {}", txid, entry.height);
+                Ok(Some(entry))
+            }
+
+            Err(bitcoincore_rpc::Error::JsonRpc(jsonrpc::error::Error::Rpc(ref rpc_err)))
+                if rpc_err.code == -5 =>
+            {
+                debug!("Transaction {} not in mempool", txid);
+                Ok(None)
+            }
+
             Err(e) => {
-                debug!("check_in_mempool({}): not present — {:?}", txid, e);
-                false
+                error!("Error getmempoolentry for {}: {:?}", txid, e);
+                Err(BitcoinClientError::RpcError(e))
             }
         }
     }
 
-    #[cfg(feature = "testing")]
+    /// Returns the list of transaction IDs currently in the node's mempool.
     fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError> {
         let txids = self.client.get_raw_mempool().map_err(|e| {
             error!("Error get_raw_mempool: {:?}", e);
             BitcoinClientError::RpcError(e)
         })?;
-        debug!("Raw mempool: {:?}", txids);
+
+        debug!("Raw mempool size: {}", txids.len());
         Ok(txids)
+    }
+
+    /// Returns `true` if the transaction is currently in the mempool.
+    ///
+    /// Uses `getmempoolentry` as the primary mechanism. If the RPC endpoint does
+    /// not support that method, falls back to checking membership via `getrawmempool`.
+    fn check_in_mempool(&self, txid: &Txid) -> bool {
+        match self.get_mempool_entry(txid) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                let err_str = e.to_string();
+
+                if err_str.contains("Unsupported method") || err_str.contains("-32600") {
+                    warn!(
+                    "RPC endpoint does not support getmempoolentry; falling back to getrawmempool"
+                );
+                    match self.get_raw_mempool() {
+                        Ok(txids) => txids.contains(txid),
+
+                        Err(e) => {
+                            error!(
+                                "getrawmempool fallback failed while checking {}: {:?}",
+                                txid, e
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    error!("Failed to determine mempool status for {}: {:?}", txid, e);
+                    false
+                }
+            }
+        }
     }
 
     #[cfg(feature = "testing")]
