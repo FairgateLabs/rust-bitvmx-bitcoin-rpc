@@ -106,7 +106,14 @@ pub trait BitcoinClientApi {
     fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError>;
 
     /// Real-time check. Returns true iff the UTXO is unspent in the UTXO set or mempool.
-    fn is_utxo_unspent(&self, txid: &Txid, vout: u32) -> Result<bool, BitcoinClientError>;
+    /// When `include_mempool` is true, an output unspent in chain OR mempool counts; when
+    /// false, only the chain UTXO set is consulted.
+    fn is_utxo_unspent(
+        &self,
+        txid: &Txid,
+        vout: u32,
+        include_mempool: bool,
+    ) -> Result<bool, BitcoinClientError>;
 
     fn fund_address(
         &self,
@@ -122,6 +129,15 @@ pub trait BitcoinClientApi {
         &self,
         tx_id: &Txid,
     ) -> Result<GetRawTransactionResult, BitcoinClientError>;
+
+    /// Live `getrawtransaction` confirmation probe (requires `-txindex`). Returns:
+    ///   - `None`        => the node does not know the tx (not in mempool, not on chain),
+    ///   - `Some(0)`     => in the mempool, unconfirmed,
+    ///   - `Some(n>=1)`  => confirmed with `n` confirmations.
+    fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError>;
+
+    /// True iff the node has the transaction index (`-txindex`) enabled, via `getindexinfo`.
+    fn is_txindex_enabled(&self) -> Result<bool, BitcoinClientError>;
 
     fn get_raw_transaction_verbosity_two(
         &self,
@@ -233,6 +249,28 @@ impl BitcoinClientApi for BitcoinClient {
         Ok(tx)
     }
 
+    fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError> {
+        // getrawtransaction returns RPC error -5 for an unknown txid. Any error here is treated as "not found".
+        match self.client.get_raw_transaction_info(tx_id, None) {
+            Ok(info) => {
+                let confs = info.confirmations.unwrap_or(0);
+                debug!("get_tx_confirmations({}) -> Some({})", tx_id, confs);
+                Ok(Some(confs))
+            }
+            Err(e) => {
+                debug!("get_tx_confirmations({}) -> None ({:?})", tx_id, e);
+                Ok(None)
+            }
+        }
+    }
+
+    fn is_txindex_enabled(&self) -> Result<bool, BitcoinClientError> {
+        // getindexinfo returns {} when no indices are active, or a map containing a "txindex" entry
+        // when -txindex is on.
+        let info: serde_json::Value = self.client.call("getindexinfo", &[])?;
+        Ok(info.get("txindex").is_some())
+    }
+
     fn get_raw_transaction_verbosity_two(
         &self,
         tx_id: &Txid,
@@ -325,13 +363,18 @@ impl BitcoinClientApi for BitcoinClient {
         })
     }
 
-    fn is_utxo_unspent(&self, txid: &Txid, vout: u32) -> Result<bool, BitcoinClientError> {
-        // include_mempool=true → returns Some for outputs unspent in chain OR mempool.
-        let tx_out_result = self.client.get_tx_out(txid, vout, Some(true))?;
+    fn is_utxo_unspent(
+        &self,
+        txid: &Txid,
+        vout: u32,
+        include_mempool: bool,
+    ) -> Result<bool, BitcoinClientError> {
+        let tx_out_result = self.client.get_tx_out(txid, vout, Some(include_mempool))?;
         debug!(
-            "is_utxo_unspent({}, {}) -> {}",
+            "is_utxo_unspent({}, {}, include_mempool={}) -> {}",
             txid,
             vout,
+            include_mempool,
             tx_out_result.is_some()
         );
         Ok(tx_out_result.is_some())
