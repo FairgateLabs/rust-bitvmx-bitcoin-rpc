@@ -176,9 +176,6 @@ pub trait BitcoinClientApi {
     fn check_in_mempool(&self, txid: &Txid) -> bool;
 
     #[cfg(feature = "testing")]
-    fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError>;
-
-    #[cfg(feature = "testing")]
     fn get_block_count(&self) -> Result<u64, BitcoinClientError>;
 
     #[cfg(feature = "testing")]
@@ -189,6 +186,30 @@ pub trait BitcoinClientApi {
 
     #[cfg(feature = "testing")]
     fn dump_privkey(&self, address: &Address) -> Result<String, BitcoinClientError>;
+
+    /// Mine a single block to `address` containing no mempool transactions. Regtest/test only.
+    #[cfg(feature = "testing")]
+    fn mine_empty_block(&self, address: &Address) -> Result<BlockHash, BitcoinClientError>;
+
+    /// Mine a block to `address` containing exactly `txs` plus the coinbase. Regtest/test only.
+    #[cfg(feature = "testing")]
+    fn generate_block_with_txs(
+        &self,
+        address: &Address,
+        txs: &[Transaction],
+    ) -> Result<BlockHash, BitcoinClientError>;
+
+    /// Set the node's mock clock (`setmocktime`). Regtest/test only.
+    #[cfg(feature = "testing")]
+    fn set_mock_time(&self, timestamp: i64) -> Result<(), BitcoinClientError>;
+
+    /// Send `amount` to `address` from the loaded wallet. Returns the txid.
+    #[cfg(feature = "testing")]
+    fn send_to_address(
+        &self,
+        address: &Address,
+        amount: Amount,
+    ) -> Result<Txid, BitcoinClientError>;
 }
 
 #[automock]
@@ -715,6 +736,88 @@ impl BitcoinClientApi for BitcoinClient {
         })?;
         debug!("Dump privkey for {:?}: {}", address, wif);
         Ok(wif.to_string())
+    }
+
+    #[cfg(feature = "testing")]
+    fn mine_empty_block(&self, address: &Address) -> Result<BlockHash, BitcoinClientError> {
+        self.generate_block_with_txs(address, &[])
+    }
+
+    #[cfg(feature = "testing")]
+    fn generate_block_with_txs(
+        &self,
+        address: &Address,
+        txs: &[Transaction],
+    ) -> Result<BlockHash, BitcoinClientError> {
+        let raw_hexes: Vec<serde_json::Value> = txs
+            .iter()
+            .map(|tx| serde_json::Value::String(serialize_hex(tx)))
+            .collect();
+        let result: serde_json::Value = self
+            .client
+            .call(
+                "generateblock",
+                &[
+                    serde_json::Value::String(address.to_string()),
+                    serde_json::Value::Array(raw_hexes),
+                ],
+            )
+            .map_err(|e| BitcoinClientError::FailedToMineBlocks {
+                error: e.to_string(),
+            })?;
+        let hash_str = result.get("hash").and_then(|h| h.as_str()).ok_or_else(|| {
+            BitcoinClientError::FailedToMineBlocks {
+                error: format!("generateblock returned no hash: {:?}", result),
+            }
+        })?;
+        let hash =
+            BlockHash::from_str(hash_str).map_err(|e| BitcoinClientError::FailedToMineBlocks {
+                error: format!("parse block hash failed: {:?}", e),
+            })?;
+        debug!("Generated block {} with {} tx(s)", hash, txs.len());
+        Ok(hash)
+    }
+
+    #[cfg(feature = "testing")]
+    fn set_mock_time(&self, timestamp: i64) -> Result<(), BitcoinClientError> {
+        self.client
+            .call::<serde_json::Value>(
+                "setmocktime",
+                &[serde_json::Value::Number(timestamp.into())],
+            )
+            .map_err(BitcoinClientError::RpcError)?;
+        debug!("Set mock time to {}", timestamp);
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    fn send_to_address(
+        &self,
+        address: &Address,
+        amount: Amount,
+    ) -> Result<Txid, BitcoinClientError> {
+        let result: serde_json::Value = self
+            .client
+            .call(
+                "sendtoaddress",
+                &[
+                    serde_json::Value::String(address.to_string()),
+                    serde_json::Value::String(format!("{}", amount.to_btc())),
+                ],
+            )
+            .map_err(BitcoinClientError::RpcError)?;
+        let txid_str =
+            result
+                .as_str()
+                .ok_or_else(|| BitcoinClientError::FailedToSendTransaction {
+                    error: format!("sendtoaddress returned no txid: {:?}", result),
+                })?;
+        let txid =
+            Txid::from_str(txid_str).map_err(|e| BitcoinClientError::FailedToSendTransaction {
+                error: format!("parse txid failed: {:?}", e),
+            })?;
+        debug!("Sent {} to {} -> {}", amount, address, txid);
+        Ok(txid)
     }
 }
 
