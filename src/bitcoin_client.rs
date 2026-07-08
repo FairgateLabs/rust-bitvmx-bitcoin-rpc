@@ -13,7 +13,7 @@ use bitcoincore_rpc::json::{GetMempoolEntryResult, GetRawTransactionResult, GetT
 use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
 use mockall::automock;
 use redact::Secret;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 pub struct BitcoinClient {
@@ -105,6 +105,16 @@ pub trait BitcoinClientApi {
 
     fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError>;
 
+    /// Real-time check. Returns true iff the UTXO is unspent in the UTXO set or mempool.
+    /// When `include_mempool` is true, an output unspent in chain OR mempool counts; when
+    /// false, only the chain UTXO set is consulted.
+    fn is_utxo_unspent(
+        &self,
+        txid: &Txid,
+        vout: u32,
+        include_mempool: bool,
+    ) -> Result<bool, BitcoinClientError>;
+
     fn fund_address(
         &self,
         address: &Address,
@@ -119,6 +129,15 @@ pub trait BitcoinClientApi {
         &self,
         tx_id: &Txid,
     ) -> Result<GetRawTransactionResult, BitcoinClientError>;
+
+    /// Live `getrawtransaction` confirmation probe (requires `-txindex`). Returns:
+    ///   - `None`        => the node does not know the tx (not in mempool, not on chain),
+    ///   - `Some(0)`     => in the mempool, unconfirmed,
+    ///   - `Some(n>=1)`  => confirmed with `n` confirmations.
+    fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError>;
+
+    /// True iff the node has the transaction index (`-txindex`) enabled, via `getindexinfo`.
+    fn is_txindex_enabled(&self) -> Result<bool, BitcoinClientError>;
 
     fn get_raw_transaction_verbosity_two(
         &self,
@@ -147,10 +166,14 @@ pub trait BitcoinClientApi {
 
     fn estimate_smart_fee(&self) -> Result<u64, BitcoinClientError>;
 
-    fn get_mempool_entry(&self, txid: &Txid) -> Result<GetMempoolEntryResult, BitcoinClientError>;
+    fn get_mempool_entry(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<GetMempoolEntryResult>, BitcoinClientError>;
 
-    #[cfg(feature = "testing")]
     fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError>;
+
+    fn check_in_mempool(&self, txid: &Txid) -> bool;
 
     #[cfg(feature = "testing")]
     fn get_block_count(&self) -> Result<u64, BitcoinClientError>;
@@ -163,6 +186,30 @@ pub trait BitcoinClientApi {
 
     #[cfg(feature = "testing")]
     fn dump_privkey(&self, address: &Address) -> Result<String, BitcoinClientError>;
+
+    /// Mine a single block to `address` containing no mempool transactions. Regtest/test only.
+    #[cfg(feature = "testing")]
+    fn mine_empty_block(&self, address: &Address) -> Result<BlockHash, BitcoinClientError>;
+
+    /// Mine a block to `address` containing exactly `txs` plus the coinbase. Regtest/test only.
+    #[cfg(feature = "testing")]
+    fn generate_block_with_txs(
+        &self,
+        address: &Address,
+        txs: &[Transaction],
+    ) -> Result<BlockHash, BitcoinClientError>;
+
+    /// Set the node's mock clock (`setmocktime`). Regtest/test only.
+    #[cfg(feature = "testing")]
+    fn set_mock_time(&self, timestamp: i64) -> Result<(), BitcoinClientError>;
+
+    /// Send `amount` to `address` from the loaded wallet. Returns the txid.
+    #[cfg(feature = "testing")]
+    fn send_to_address(
+        &self,
+        address: &Address,
+        amount: Amount,
+    ) -> Result<Txid, BitcoinClientError>;
 }
 
 #[automock]
@@ -221,6 +268,28 @@ impl BitcoinClientApi for BitcoinClient {
             tx.txid == *tx_id
         );
         Ok(tx)
+    }
+
+    fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError> {
+        // getrawtransaction returns RPC error -5 for an unknown txid. Any error here is treated as "not found".
+        match self.client.get_raw_transaction_info(tx_id, None) {
+            Ok(info) => {
+                let confs = info.confirmations.unwrap_or(0);
+                debug!("get_tx_confirmations({}) -> Some({})", tx_id, confs);
+                Ok(Some(confs))
+            }
+            Err(e) => {
+                debug!("get_tx_confirmations({}) -> None ({:?})", tx_id, e);
+                Ok(None)
+            }
+        }
+    }
+
+    fn is_txindex_enabled(&self) -> Result<bool, BitcoinClientError> {
+        // getindexinfo returns {} when no indices are active, or a map containing a "txindex" entry
+        // when -txindex is on.
+        let info: serde_json::Value = self.client.call("getindexinfo", &[])?;
+        Ok(info.get("txindex").is_some())
     }
 
     fn get_raw_transaction_verbosity_two(
@@ -313,6 +382,23 @@ impl BitcoinClientApi for BitcoinClient {
         tx_out_result.ok_or(BitcoinClientError::FailedToGetTxOutput {
             error: "Tx output not found".to_string(),
         })
+    }
+
+    fn is_utxo_unspent(
+        &self,
+        txid: &Txid,
+        vout: u32,
+        include_mempool: bool,
+    ) -> Result<bool, BitcoinClientError> {
+        let tx_out_result = self.client.get_tx_out(txid, vout, Some(include_mempool))?;
+        debug!(
+            "is_utxo_unspent({}, {}, include_mempool={}) -> {}",
+            txid,
+            vout,
+            include_mempool,
+            tx_out_result.is_some()
+        );
+        Ok(tx_out_result.is_some())
     }
 
     fn fund_address(
@@ -531,28 +617,85 @@ impl BitcoinClientApi for BitcoinClient {
         Ok(())
     }
 
-    fn get_mempool_entry(&self, txid: &Txid) -> Result<GetMempoolEntryResult, BitcoinClientError> {
+    /// Returns the mempool entry for `txid` if the transaction is currently in the node's mempool.
+    ///
+    /// Returns:
+    /// - `Ok(Some(entry))` if the transaction is present in the mempool.
+    /// - `Ok(None)` if the transaction is not present in the mempool.
+    /// - `Err(...)` for transport, RPC, serialization, or other unexpected errors.
+    fn get_mempool_entry(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<GetMempoolEntryResult>, BitcoinClientError> {
         let txid_str = txid.to_string();
         let args = vec![serde_json::Value::String(txid_str)];
 
-        let entry: GetMempoolEntryResult =
-            self.client.call("getmempoolentry", &args).map_err(|e| {
-                error!("Error getmempoolentry for {}: {:?}", txid, e);
-                BitcoinClientError::RpcError(e)
-            })?;
+        match self
+            .client
+            .call::<GetMempoolEntryResult>("getmempoolentry", &args)
+        {
+            Ok(entry) => {
+                debug!("getmempoolentry({}) -> height: {}", txid, entry.height);
+                Ok(Some(entry))
+            }
 
-        debug!("getmempoolentry({}) -> height: {}", txid, entry.height);
-        Ok(entry)
+            Err(bitcoincore_rpc::Error::JsonRpc(jsonrpc::error::Error::Rpc(ref rpc_err)))
+                if rpc_err.code == -5 =>
+            {
+                debug!("Transaction {} not in mempool", txid);
+                Ok(None)
+            }
+
+            Err(e) => {
+                error!("Error getmempoolentry for {}: {:?}", txid, e);
+                Err(BitcoinClientError::RpcError(e))
+            }
+        }
     }
 
-    #[cfg(feature = "testing")]
+    /// Returns the list of transaction IDs currently in the node's mempool.
     fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError> {
         let txids = self.client.get_raw_mempool().map_err(|e| {
             error!("Error get_raw_mempool: {:?}", e);
             BitcoinClientError::RpcError(e)
         })?;
-        debug!("Raw mempool: {:?}", txids);
+
+        debug!("Raw mempool size: {}", txids.len());
         Ok(txids)
+    }
+
+    /// Returns `true` if the transaction is currently in the mempool.
+    ///
+    /// Uses `getmempoolentry` as the primary mechanism. If the RPC endpoint does
+    /// not support that method, falls back to checking membership via `getrawmempool`.
+    fn check_in_mempool(&self, txid: &Txid) -> bool {
+        match self.get_mempool_entry(txid) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                let err_str = e.to_string();
+
+                if err_str.contains("Unsupported method") || err_str.contains("-32600") {
+                    warn!(
+                    "RPC endpoint does not support getmempoolentry; falling back to getrawmempool"
+                );
+                    match self.get_raw_mempool() {
+                        Ok(txids) => txids.contains(txid),
+
+                        Err(e) => {
+                            error!(
+                                "getrawmempool fallback failed while checking {}: {:?}",
+                                txid, e
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    error!("Failed to determine mempool status for {}: {:?}", txid, e);
+                    false
+                }
+            }
+        }
     }
 
     #[cfg(feature = "testing")]
@@ -593,6 +736,88 @@ impl BitcoinClientApi for BitcoinClient {
         })?;
         debug!("Dump privkey for {:?}: {}", address, wif);
         Ok(wif.to_string())
+    }
+
+    #[cfg(feature = "testing")]
+    fn mine_empty_block(&self, address: &Address) -> Result<BlockHash, BitcoinClientError> {
+        self.generate_block_with_txs(address, &[])
+    }
+
+    #[cfg(feature = "testing")]
+    fn generate_block_with_txs(
+        &self,
+        address: &Address,
+        txs: &[Transaction],
+    ) -> Result<BlockHash, BitcoinClientError> {
+        let raw_hexes: Vec<serde_json::Value> = txs
+            .iter()
+            .map(|tx| serde_json::Value::String(serialize_hex(tx)))
+            .collect();
+        let result: serde_json::Value = self
+            .client
+            .call(
+                "generateblock",
+                &[
+                    serde_json::Value::String(address.to_string()),
+                    serde_json::Value::Array(raw_hexes),
+                ],
+            )
+            .map_err(|e| BitcoinClientError::FailedToMineBlocks {
+                error: e.to_string(),
+            })?;
+        let hash_str = result.get("hash").and_then(|h| h.as_str()).ok_or_else(|| {
+            BitcoinClientError::FailedToMineBlocks {
+                error: format!("generateblock returned no hash: {:?}", result),
+            }
+        })?;
+        let hash =
+            BlockHash::from_str(hash_str).map_err(|e| BitcoinClientError::FailedToMineBlocks {
+                error: format!("parse block hash failed: {:?}", e),
+            })?;
+        debug!("Generated block {} with {} tx(s)", hash, txs.len());
+        Ok(hash)
+    }
+
+    #[cfg(feature = "testing")]
+    fn set_mock_time(&self, timestamp: i64) -> Result<(), BitcoinClientError> {
+        self.client
+            .call::<serde_json::Value>(
+                "setmocktime",
+                &[serde_json::Value::Number(timestamp.into())],
+            )
+            .map_err(BitcoinClientError::RpcError)?;
+        debug!("Set mock time to {}", timestamp);
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    fn send_to_address(
+        &self,
+        address: &Address,
+        amount: Amount,
+    ) -> Result<Txid, BitcoinClientError> {
+        let result: serde_json::Value = self
+            .client
+            .call(
+                "sendtoaddress",
+                &[
+                    serde_json::Value::String(address.to_string()),
+                    serde_json::Value::String(format!("{}", amount.to_btc())),
+                ],
+            )
+            .map_err(BitcoinClientError::RpcError)?;
+        let txid_str =
+            result
+                .as_str()
+                .ok_or_else(|| BitcoinClientError::FailedToSendTransaction {
+                    error: format!("sendtoaddress returned no txid: {:?}", result),
+                })?;
+        let txid =
+            Txid::from_str(txid_str).map_err(|e| BitcoinClientError::FailedToSendTransaction {
+                error: format!("parse txid failed: {:?}", e),
+            })?;
+        debug!("Sent {} to {} -> {}", amount, address, txid);
+        Ok(txid)
     }
 }
 
