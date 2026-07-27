@@ -393,10 +393,16 @@ mod tests {
     #[test]
     fn parse_accepts_every_known_name() {
         assert_eq!(NetworkFlavor::parse("regtest"), Ok(NetworkFlavor::Regtest));
-        assert_eq!(NetworkFlavor::parse("simchain"), Ok(NetworkFlavor::Simchain));
+        assert_eq!(
+            NetworkFlavor::parse("simchain"),
+            Ok(NetworkFlavor::Simchain)
+        );
         assert_eq!(NetworkFlavor::parse("testnet"), Ok(NetworkFlavor::Testnet));
         assert_eq!(NetworkFlavor::parse("testnet3"), Ok(NetworkFlavor::Testnet));
-        assert_eq!(NetworkFlavor::parse("testnet4"), Ok(NetworkFlavor::Testnet4));
+        assert_eq!(
+            NetworkFlavor::parse("testnet4"),
+            Ok(NetworkFlavor::Testnet4)
+        );
         assert_eq!(NetworkFlavor::parse("signet"), Ok(NetworkFlavor::Signet));
         assert_eq!(NetworkFlavor::parse("mainnet"), Ok(NetworkFlavor::Bitcoin));
         assert_eq!(NetworkFlavor::parse("bitcoin"), Ok(NetworkFlavor::Bitcoin));
@@ -415,7 +421,10 @@ mod tests {
         // Unset and empty both mean "caller said nothing" -> the default.
         assert_eq!(NetworkFlavor::resolve(None), Ok(NetworkFlavor::Regtest));
         assert_eq!(NetworkFlavor::resolve(Some("")), Ok(NetworkFlavor::Regtest));
-        assert_eq!(NetworkFlavor::resolve(Some("   ")), Ok(NetworkFlavor::Regtest));
+        assert_eq!(
+            NetworkFlavor::resolve(Some("   ")),
+            Ok(NetworkFlavor::Regtest)
+        );
 
         assert_eq!(
             NetworkFlavor::resolve(Some("simchain")),
@@ -519,11 +528,7 @@ mod tests {
             if flavor == NetworkFlavor::Signet {
                 assert!(!flavor.is_local_chain() && !flavor.is_real_money());
             } else {
-                assert_eq!(
-                    flavor.is_local_chain(),
-                    !flavor.is_real_money(),
-                    "{flavor}"
-                );
+                assert_eq!(flavor.is_local_chain(), !flavor.is_real_money(), "{flavor}");
             }
         }
     }

@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use crate::errors::BitcoinClientError;
-use crate::reqwest_https::ReqwestHttpsTransport;
 use crate::network_flavor::NetworkFlavor;
+use crate::reqwest_https::ReqwestHttpsTransport;
 use crate::rpc_config::RpcConfig;
 use crate::types::{BlockHeight, BlockInfo};
 use bitcoin::consensus::encode::serialize_hex;
@@ -74,7 +74,10 @@ impl BitcoinClient {
             mask_url_secrets(url.expose_secret())
         );
 
-        Ok(Self { client, network_flavor })
+        Ok(Self {
+            client,
+            network_flavor,
+        })
     }
 
     /// Build a client that knows its chain's operational profile.
