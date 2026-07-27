@@ -47,6 +47,15 @@ pub enum BitcoinClientError {
     #[error("Invalid network")]
     InvalidNetwork,
 
+    /// A mining or node-wallet operation was attempted against a simchain simnet.
+    ///
+    /// Simchain reports `chain == "regtest"`, so the ordinary network checks cannot
+    /// catch this. Blocks there are produced externally and the user-facing node runs
+    /// with `-disablewallet`; driving either from here would defeat the point of
+    /// testing against an autonomous chain.
+    #[error("{operation} is not allowed on simchain: blocks are mined externally and node1 has no wallet")]
+    NotAllowedOnSimchain { operation: String },
+
     #[error("Failed to load wallet {error}")]
     FailedToLoadWallet { error: String },
 

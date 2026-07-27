@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use crate::errors::BitcoinClientError;
 use crate::reqwest_https::ReqwestHttpsTransport;
+use crate::network_flavor::NetworkFlavor;
 use crate::rpc_config::RpcConfig;
 use crate::types::{BlockHeight, BlockInfo};
 use bitcoin::consensus::encode::serialize_hex;
@@ -18,13 +19,33 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug)]
 pub struct BitcoinClient {
     pub client: Client,
+    /// Which chain is behind `client`, when we know.
+    ///
+    /// `None` for constructors that take bare URL and credentials: they genuinely
+    /// cannot tell, and claiming a network we have not been told about would be a lie.
+    /// Built from a config via [`BitcoinClient::new_from_config`], it is `Some` and the
+    /// simchain guard rails below are armed.
+    network_flavor: Option<NetworkFlavor>,
 }
 
 impl BitcoinClient {
+    /// Build a client that does not know which chain it is talking to.
+    ///
+    /// The simchain guard rails cannot fire for it, so prefer
+    /// [`BitcoinClient::new_from_config`] wherever an [`RpcConfig`] is in scope.
     pub fn new(
         url: &Secret<String>,
         user: &Secret<String>,
         pass: &Secret<String>,
+    ) -> Result<Self, BitcoinClientError> {
+        Self::new_with_flavor(url, user, pass, None)
+    }
+
+    pub fn new_with_flavor(
+        url: &Secret<String>,
+        user: &Secret<String>,
+        pass: &Secret<String>,
+        network_flavor: Option<NetworkFlavor>,
     ) -> Result<Self, BitcoinClientError> {
         let pass = match pass.expose_secret().is_empty() {
             true => None,
@@ -53,11 +74,20 @@ impl BitcoinClient {
             mask_url_secrets(url.expose_secret())
         );
 
-        Ok(Self { client })
+        Ok(Self { client, network_flavor })
     }
 
+    /// Build a client that knows its chain's operational profile.
+    ///
+    /// This is the constructor that arms the simchain guard rails, so prefer it
+    /// wherever an [`RpcConfig`] is available.
     pub fn new_from_config(config: &RpcConfig) -> Result<Self, BitcoinClientError> {
-        Self::new(&config.url, &config.username, &config.password)
+        Self::new_with_flavor(
+            &config.url,
+            &config.username,
+            &config.password,
+            Some(config.network_flavor),
+        )
     }
 
     pub fn new_with_wallet(
@@ -65,6 +95,30 @@ impl BitcoinClient {
         user: &Secret<String>,
         pass: &Secret<String>,
         wallet_name: &str,
+    ) -> Result<Self, BitcoinClientError> {
+        Self::new_with_wallet_and_flavor(url, user, pass, wallet_name, None)
+    }
+
+    /// [`BitcoinClient::new_with_wallet`] for a config whose network_flavor is known.
+    pub fn new_from_config_with_wallet(
+        config: &RpcConfig,
+        wallet_name: &str,
+    ) -> Result<Self, BitcoinClientError> {
+        Self::new_with_wallet_and_flavor(
+            &config.url,
+            &config.username,
+            &config.password,
+            wallet_name,
+            Some(config.network_flavor),
+        )
+    }
+
+    pub fn new_with_wallet_and_flavor(
+        url: &Secret<String>,
+        user: &Secret<String>,
+        pass: &Secret<String>,
+        wallet_name: &str,
+        network_flavor: Option<NetworkFlavor>,
     ) -> Result<Self, BitcoinClientError> {
         let url = if !wallet_name.is_empty() {
             if !wallet_name
@@ -81,7 +135,32 @@ impl BitcoinClient {
             url.expose_secret().to_string()
         };
 
-        Self::new(&Secret::new(url), user, pass)
+        Self::new_with_flavor(&Secret::new(url), user, pass, network_flavor)
+    }
+
+    /// Refuse operations that would mutate a chain we do not own.
+    ///
+    /// Simchain is regtest at the consensus layer, so the usual
+    /// `chain != Network::Regtest` checks all pass against it. Worse,
+    /// `generatetoaddress` is a *mining* RPC rather than a wallet one, so a simchain
+    /// node with `-disablewallet` still serves it happily: an unguarded call would
+    /// silently mine a real block on a chain that is supposed to be mining itself.
+    ///
+    /// This says nothing about which chain we are on. Callers that already require
+    /// regtest keep their own check unchanged, so nothing that worked before starts
+    /// failing now.
+    fn reject_simchain(&self, operation: &str) -> Result<(), BitcoinClientError> {
+        if self.network_flavor == Some(NetworkFlavor::Simchain) {
+            error!(
+                "Refusing to call {} against simchain: mining and node-wallet \
+                 operations belong to the simnet, not to us",
+                operation
+            );
+            return Err(BitcoinClientError::NotAllowedOnSimchain {
+                operation: operation.to_string(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -411,6 +490,7 @@ impl BitcoinClientApi for BitcoinClient {
         if blockchain_info.chain != Network::Regtest {
             return Err(BitcoinClientError::InvalidNetwork);
         }
+        self.reject_simchain("fund_address")?;
 
         let txid = self
             .client
@@ -494,6 +574,7 @@ impl BitcoinClientApi for BitcoinClient {
         if blockchain_info.chain != Network::Regtest {
             return Err(BitcoinClientError::InvalidNetwork);
         }
+        self.reject_simchain("mine_blocks_to_address")?;
 
         self.client
             .generate_to_address(block_num, address)
@@ -526,6 +607,11 @@ impl BitcoinClientApi for BitcoinClient {
     }
 
     fn init_wallet(&self, wallet_name: &str) -> Result<Address, BitcoinClientError> {
+        // Deliberately no `chain != Regtest` check here: testnet4 runs against a local
+        // node with a live wallet and legitimately calls this. Only simchain, whose
+        // user-facing node has no wallet at all, is rejected.
+        self.reject_simchain("init_wallet")?;
+
         let blockchain_info = self.get_blockchain_info()?;
 
         let wallets =
@@ -571,6 +657,8 @@ impl BitcoinClientApi for BitcoinClient {
     }
 
     fn create_wallet_only(&self, wallet_name: &str) -> Result<(), BitcoinClientError> {
+        self.reject_simchain("create_wallet_only")?;
+
         let wallets =
             self.client
                 .list_wallets()
@@ -606,6 +694,7 @@ impl BitcoinClientApi for BitcoinClient {
         if blockchain_info.chain != Network::Regtest {
             return Err(BitcoinClientError::InvalidNetwork);
         }
+        self.reject_simchain("invalidate_block")?;
 
         self.client.invalidate_block(hash).map_err(|e| {
             error!("Failed to invalidate block {}: {:?}", hash, e);
@@ -876,6 +965,84 @@ fn is_potential_secret(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rpc_config(network_flavor: NetworkFlavor) -> RpcConfig {
+        RpcConfig::new(
+            network_flavor,
+            "http://127.0.0.1:18443".to_string(),
+            "foo".to_string(),
+            "rpcpassword".to_string(),
+            "test_wallet".to_string(),
+        )
+    }
+
+    /// `reject_simchain` inspects local state only, so these tests need no node.
+    #[test]
+    fn simchain_flavor_blocks_chain_mutating_operations() {
+        let client = BitcoinClient::new_from_config(&rpc_config(NetworkFlavor::Simchain)).unwrap();
+
+        for op in [
+            "fund_address",
+            "mine_blocks_to_address",
+            "invalidate_block",
+            "init_wallet",
+        ] {
+            let err = client.reject_simchain(op).unwrap_err();
+            assert!(
+                matches!(&err, BitcoinClientError::NotAllowedOnSimchain { operation } if operation == op),
+                "unexpected error for {op}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_other_network_is_allowed() {
+        // The regtest invariant: adding the guard must not block plain regtest, and
+        // it must not block the live networks either.
+        for network_flavor in NetworkFlavor::ALL {
+            if network_flavor == NetworkFlavor::Simchain {
+                continue;
+            }
+            let client = BitcoinClient::new_from_config(&rpc_config(network_flavor)).unwrap();
+            assert!(
+                client.reject_simchain("mine_blocks_to_address").is_ok(),
+                "{network_flavor} should not be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_constructors_have_no_flavor_and_are_not_blocked() {
+        // A client built from bare URL and credentials genuinely cannot know which
+        // chain it faces, so it claims nothing and the guard cannot fire. Call sites
+        // that were never migrated to `new_from_config` keep working.
+        let client = BitcoinClient::new(
+            &Secret::new("http://127.0.0.1:18443".to_string()),
+            &Secret::new("foo".to_string()),
+            &Secret::new("rpcpassword".to_string()),
+        )
+        .unwrap();
+        assert_eq!(client.network_flavor, None);
+        assert!(client.reject_simchain("mine_blocks_to_address").is_ok());
+    }
+
+    #[test]
+    fn wallet_constructors_carry_the_flavor() {
+        let client =
+            BitcoinClient::new_from_config_with_wallet(&rpc_config(NetworkFlavor::Simchain), "w")
+                .unwrap();
+        assert_eq!(client.network_flavor, Some(NetworkFlavor::Simchain));
+        assert!(client.reject_simchain("fund_address").is_err());
+
+        let client = BitcoinClient::new_with_wallet(
+            &Secret::new("http://127.0.0.1:18443".to_string()),
+            &Secret::new("foo".to_string()),
+            &Secret::new("rpcpassword".to_string()),
+            "w",
+        )
+        .unwrap();
+        assert_eq!(client.network_flavor, None);
+    }
 
     #[test]
     fn test_mask_url_secrets() {
