@@ -4,14 +4,18 @@ version = "0.8.2"
 edition = "2021"
 
 [dependencies]
-bitcoin = "0.32.6"
+bitcoin = "0.32.102"
 bitcoincore-rpc = "0.19"
-thiserror = "2.0.12"
-serde = { version = "1.0.205", features = ["derive"] }
+thiserror = "2.0.20"
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-reqwest = { version = "0.12.10", features = ["json", "rustls-tls-webpki-roots-no-provider", "blocking"] }
-mockall = "0.13.0"
-tracing = "0.1.41"
+reqwest = { version = "0.13.4", features = [
+    "json",
+    "rustls-no-provider",
+    "blocking",
+] }
+mockall = "0.15.0"
+tracing = "0.1.44"
 redact = { version = "0.1", features = ["serde"] }
 
 [features]
