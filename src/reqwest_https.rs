@@ -129,7 +129,7 @@ impl Builder {
         if let Some(ref pass) = pass {
             s.push_str(pass.as_ref());
         }
-        self.tp.basic_auth = Some(format!("Basic {}", &base64::encode(s.as_bytes())));
+        self.tp.basic_auth = Some(format!("Basic {}", base64::encode(s.as_bytes())));
         self
     }
 
