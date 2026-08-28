@@ -230,22 +230,22 @@ impl BitcoinClientApi for BitcoinClient {
                         //   1. Convert BTC to satoshis by multiplying by 100,000,000 (fee_rate.to_sat()).
                         //   2. Convert per kilobyte to per byte by dividing by 1,000.
                         // So, the final formula is: (BTC_per_kB * 100_000_000) / 1_000 = sat/vB
-                        let fee_rate = (fee_rate.to_sat() / 1_000) as u64;
+                        let fee_rate = fee_rate.to_sat() / 1_000;
                         debug!("Estimated smart fee: {} sat/vB", fee_rate);
-                        return Ok(fee_rate);
+                        Ok(fee_rate)
                     }
                     None => {
                         debug!(
                             "Estimated smart fee not available, using default: {} sat/vB",
                             DEFAULT_FEE_RATE
                         );
-                        return Ok(DEFAULT_FEE_RATE);
+                        Ok(DEFAULT_FEE_RATE)
                     }
                 }
             }
             Err(error) => {
                 error!("Error estimating smart fee: {:?}", error);
-                return Err(BitcoinClientError::RpcError(error));
+                Err(BitcoinClientError::RpcError(error))
             }
         }
     }
@@ -318,7 +318,7 @@ impl BitcoinClientApi for BitcoinClient {
             "get_raw_transaction_verbosity_two({}) -> found: {}",
             tx_id,
             tx.get("txid")
-                .map_or(false, |v| v.as_str() == Some(&tx_id.to_string()))
+                .is_some_and(|v| v.as_str() == Some(&tx_id.to_string()))
         );
         Ok(tx)
     }
