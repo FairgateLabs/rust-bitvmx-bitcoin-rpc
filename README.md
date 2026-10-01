@@ -11,13 +11,13 @@ It is not production-ready, has not been audited, and future updates may introdu
 ## Methods
 
 - `BitcoinClient::new(url, user, pass)` - Connect to a Bitcoin Core node.
-- `get_best_block()` - Get the current best block height.
+- `get_tip_height()` - Get the height of the node's chain tip.
 - `get_block_by_height(height)` - Get block info by height.
 - `get_block_by_hash(hash)` - Get block info by hash.
 - `get_block_id_by_height(height)` - Get block hash by height.
 - `get_blockchain_info()` - Get blockchain info.
 - `tx_exists(txid)` - Check if a transaction exists.
-- `get_raw_transaction_info(txid)` - Get raw transaction details.
+- `get_raw_transaction_info(txid)` - Get raw transaction details, `None` when the node does not know the transaction.
 - `get_raw_transaction_verbosity_two(txid)` - Get raw transaction with verbosity=2 details. *requires Bitcoin Core version 25.0.0 or higher*
 - `get_transaction(txid)` - Get transaction by txid.
 - `send_transaction(tx)` - Send a raw transaction.
@@ -46,7 +46,7 @@ let client = BitcoinClient::new(
 
 #### Getting basic blockchain data
 ```rust
-let height = client.get_best_block()?;
+let height = client.get_tip_height()?;
 
 let info = client.get_blockchain_info()?;
 
