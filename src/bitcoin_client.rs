@@ -112,10 +112,9 @@ pub trait BitcoinClientApi {
 
     fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError>;
 
-    /// Real-time check. Returns true iff the UTXO is unspent in the UTXO set or mempool.
-    /// When `include_mempool` is true, an output unspent in chain OR mempool counts; when
-    /// false, only the chain UTXO set is consulted.
-    fn is_utxo_unspent(
+    /// Real-time check. Returns true iff the UTXO is not in the UTXO set, counting the mempool when
+    /// `include_mempool` is true; when false, only the chain UTXO set is consulted.
+    fn is_utxo_spent(
         &self,
         txid: &Txid,
         vout: u32,
@@ -409,7 +408,7 @@ impl BitcoinClientApi for BitcoinClient {
         })
     }
 
-    fn is_utxo_unspent(
+    fn is_utxo_spent(
         &self,
         txid: &Txid,
         vout: u32,
@@ -417,13 +416,13 @@ impl BitcoinClientApi for BitcoinClient {
     ) -> Result<bool, BitcoinClientError> {
         let tx_out_result = self.client.get_tx_out(txid, vout, Some(include_mempool))?;
         debug!(
-            "is_utxo_unspent({}, {}, include_mempool={}) -> {}",
+            "is_utxo_spent({}, {}, include_mempool={}) -> {}",
             txid,
             vout,
             include_mempool,
-            tx_out_result.is_some()
+            tx_out_result.is_none()
         );
-        Ok(tx_out_result.is_some())
+        Ok(tx_out_result.is_none())
     }
 
     fn fund_address(
