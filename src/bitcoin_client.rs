@@ -138,9 +138,10 @@ pub trait BitcoinClientApi {
     ) -> Result<Option<GetRawTransactionResult>, BitcoinClientError>;
 
     /// Live `getrawtransaction` confirmation probe (requires `-txindex`). Returns:
-    ///   - `None`        => the node does not know the tx (not in mempool, not on chain),
+    ///   - `None`        => the tx is neither in the mempool nor in the active chain. This covers a tx the node does not
+    ///                      know, and a tx the txindex still finds in a block a reorg disconnected (stale `blockhash`),
     ///   - `Some(0)`     => in the mempool, unconfirmed,
-    ///   - `Some(n>=1)`  => confirmed with `n` confirmations.
+    ///   - `Some(n>=1)`  => confirmed in the active chain with `n` confirmations.
     fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError>;
 
     /// True iff the node has the transaction index (`-txindex`) enabled, via `getindexinfo`.
@@ -285,11 +286,26 @@ impl BitcoinClientApi for BitcoinClient {
     fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError> {
         // getrawtransaction returns RPC error -5 for an unknown txid. Any error here is treated as "not found".
         match self.client.get_raw_transaction_info(tx_id, None) {
-            Ok(info) => {
-                let confs = info.confirmations.unwrap_or(0);
-                debug!("get_tx_confirmations({}) -> Some({})", tx_id, confs);
-                Ok(Some(confs))
-            }
+            // The node checks the mempool before the txindex, so a missing blockhash means the tx is in the mempool. A
+            // blockhash with zero or missing confirmations is a block outside the active chain: the txindex keeps entries
+            // of disconnected blocks, so the tx is in neither the mempool nor the chain.
+            Ok(info) => match (info.blockhash, info.confirmations) {
+                (Some(_), Some(confs)) if confs >= 1 => {
+                    debug!("get_tx_confirmations({}) -> Some({})", tx_id, confs);
+                    Ok(Some(confs))
+                }
+                (Some(block_hash), _) => {
+                    debug!(
+                        "get_tx_confirmations({}) -> None (block {} is not in the active chain)",
+                        tx_id, block_hash
+                    );
+                    Ok(None)
+                }
+                (None, _) => {
+                    debug!("get_tx_confirmations({}) -> Some(0)", tx_id);
+                    Ok(Some(0))
+                }
+            },
             Err(e) => {
                 debug!("get_tx_confirmations({}) -> None ({:?})", tx_id, e);
                 Ok(None)
