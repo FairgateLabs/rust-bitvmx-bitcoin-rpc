@@ -138,10 +138,10 @@ pub trait BitcoinClientApi {
     ) -> Result<Option<GetRawTransactionResult>, BitcoinClientError>;
 
     /// Live `getrawtransaction` confirmation probe (requires `-txindex`). Returns:
-    ///   - `None`        => the tx is neither in the mempool nor in the active chain. This covers a tx the node does not
-    ///                      know, and a tx the txindex still finds in a block a reorg disconnected (stale `blockhash`),
-    ///   - `Some(0)`     => in the mempool, unconfirmed,
-    ///   - `Some(n>=1)`  => confirmed in the active chain with `n` confirmations.
+    /// - `None` => the tx is neither in the mempool nor in the active chain. This covers a tx the node does not
+    ///   know, and a tx the txindex still finds in a block a reorg disconnected (stale `blockhash`),
+    /// - `Some(0)` => in the mempool, unconfirmed,
+    /// - `Some(n>=1)` => confirmed in the active chain with `n` confirmations.
     fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError>;
 
     /// True iff the node has the transaction index (`-txindex`) enabled, via `getindexinfo`.
