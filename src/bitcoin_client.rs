@@ -112,8 +112,14 @@ pub trait BitcoinClientApi {
 
     fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError>;
 
-    /// Real-time check. Returns true iff the UTXO is not in the UTXO set, counting the mempool when
-    /// `include_mempool` is true; when false, only the chain UTXO set is consulted.
+    /// Real-time `gettxout` check. Returns true iff the output is not in the node's UTXO set. With `include_mempool`
+    /// true that set is the mempool view (spends in the mempool count, outputs created in the mempool exist), with it
+    /// false only the chain UTXO set is consulted.
+    ///
+    /// "Not in the UTXO set" is wider than "spent". It is also true for an output that never existed (unknown txid or
+    /// vout out of range), for one whose creating tx was dropped or orphaned by a reorg, and, with `include_mempool`
+    /// false, for one whose creating tx is still unconfirmed. A caller that needs to tell these apart must check the
+    /// creating tx itself.
     fn is_utxo_spent(
         &self,
         txid: &Txid,
@@ -142,6 +148,9 @@ pub trait BitcoinClientApi {
     ///   know, and a tx the txindex still finds in a block a reorg disconnected (stale `blockhash`),
     /// - `Some(0)` => in the mempool, unconfirmed,
     /// - `Some(n>=1)` => confirmed in the active chain with `n` confirmations.
+    ///
+    /// Any failure other than the node answering "not found" is returned as an error, so an unreachable node is never
+    /// mistaken for a dropped tx.
     fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError>;
 
     /// True iff the node has the transaction index (`-txindex`) enabled, via `getindexinfo`.
@@ -284,7 +293,8 @@ impl BitcoinClientApi for BitcoinClient {
     }
 
     fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError> {
-        // getrawtransaction returns RPC error -5 for an unknown txid. Any error here is treated as "not found".
+        // getrawtransaction returns RPC error -5 for an unknown txid. Only that answer means "not found", any other
+        // error is returned so a node outage does not read as a dropped tx.
         match self.client.get_raw_transaction_info(tx_id, None) {
             // The node checks the mempool before the txindex, so a missing blockhash means the tx is in the mempool. A
             // blockhash with zero or missing confirmations is a block outside the active chain: the txindex keeps entries
@@ -306,9 +316,13 @@ impl BitcoinClientApi for BitcoinClient {
                     Ok(Some(0))
                 }
             },
-            Err(e) => {
-                debug!("get_tx_confirmations({}) -> None ({:?})", tx_id, e);
+            Err(e) if is_not_found(&e) => {
+                debug!("get_tx_confirmations({}) -> None (not found)", tx_id);
                 Ok(None)
+            }
+            Err(e) => {
+                error!("get_tx_confirmations({}) failed: {:?}", tx_id, e);
+                Err(BitcoinClientError::RpcError(e))
             }
         }
     }
@@ -980,6 +994,30 @@ mod tests {
             Box::new(std::io::Error::other("connection refused")),
         ));
         assert!(!is_not_found(&unreachable));
+    }
+
+    // A node that cannot be reached is an error, not a tx the node does not know.
+    #[test]
+    fn test_get_tx_confirmations_unreachable_node() {
+        // Bind to a free port and release it, so nothing is listening there and the connection is refused.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let bitcoin_client = BitcoinClient::new(
+            &Secret::new(format!("http://127.0.0.1:{port}")),
+            &Secret::new("foo".to_string()),
+            &Secret::new("rpcpassword".to_string()),
+        )
+        .unwrap();
+
+        let tx_id = Txid::from_str(&"11".repeat(32)).unwrap();
+        let result = bitcoin_client.get_tx_confirmations(&tx_id);
+        assert!(
+            matches!(result, Err(BitcoinClientError::RpcError(_))),
+            "expected an RPC error, got {result:?}"
+        );
     }
 
     #[test]
