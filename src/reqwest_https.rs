@@ -65,15 +65,21 @@ impl ReqwestHttpsTransport {
         }
 
         let response = request.send()?;
+        let status = response.status();
+        let body = response.text()?;
 
-        if !response.status().is_success() {
-            return Err(Error::Http(HttpError {
-                status_code: response.status().as_u16() as i32,
-                body: response.text().unwrap_or_default(),
-            }));
+        // Bitcoin Core commonly returns JSON-RPC errors with HTTP 500. Parse the body before
+        // rejecting the HTTP status so callers receive the useful RPC error (for example, -5 for
+        // an unknown transaction). A non-success response without a valid RPC body remains an
+        // HTTP transport failure.
+        match serde_json::from_str(&body) {
+            Ok(response) => Ok(response),
+            Err(_) if !status.is_success() => Err(Error::Http(HttpError {
+                status_code: status.as_u16() as i32,
+                body,
+            })),
+            Err(error) => Err(Error::Json(error)),
         }
-
-        Ok(response.json()?)
     }
 }
 
