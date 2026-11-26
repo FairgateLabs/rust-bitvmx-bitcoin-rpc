@@ -1,9 +1,9 @@
 //! Exercise the real HTTP transport used by BitcoinClient, rather than mocking RpcError.
 //! Bitcoin Core sends an unknown-transaction JSON-RPC error (-5) with HTTP 500.
-use bitcoincore_rpc::{jsonrpc, Error, RpcApi};
 use bitvmx_bitcoin_rpc::{
     bitcoin_client::{BitcoinClient, BitcoinClientApi},
     errors::BitcoinClientError,
+    jsonrpc,
 };
 use redact::Secret;
 use serde_json::{json, Value};
@@ -35,6 +35,7 @@ fn with_unknown_transaction_response<T>(
                 Err(error) => panic!("accept failed: {error}"),
             }
         };
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -96,17 +97,15 @@ fn with_unknown_transaction_response<T>(
     result
 }
 
-fn unknown_transaction_response(status: u16, rpc_body: bool) -> Error {
+// The client field is private, so the raw getrawtransaction request goes through the public verbosity two method,
+// which sends it and returns the node's error unchanged.
+fn unknown_transaction_response(status: u16, rpc_body: bool) -> BitcoinClientError {
+    let txid = "0257d69ee3f36d47b98aabda42cca1501da5e86af48f16f759fd458bbc011310"
+        .parse()
+        .unwrap();
     with_unknown_transaction_response(status, rpc_body, |client| {
         client
-            .client
-            .call::<Value>(
-                "getrawtransaction",
-                &[
-                    json!("0257d69ee3f36d47b98aabda42cca1501da5e86af48f16f759fd458bbc011310"),
-                    json!(true),
-                ],
-            )
+            .get_raw_transaction_verbosity_two(&txid)
             .expect_err("unknown transaction must return an RPC error")
     })
 }
@@ -117,8 +116,24 @@ fn http_500_preserves_transaction_not_found_rpc_error() {
     // Regression: returning Transport here prevents is_not_found from matching -5.
     // Monitoring then aborts the coordinator tick before the queued tx is broadcast.
     assert!(
-        matches!(&error, Error::JsonRpc(jsonrpc::Error::Rpc(rpc)) if rpc.code == -5),
+        matches!(&error, BitcoinClientError::RpcError(jsonrpc::Error::Rpc(rpc)) if rpc.code == -5),
         "expected JSON-RPC -5 from Bitcoin Core's HTTP 500 response, got {error:?}"
+    );
+    assert!(error.is_not_found());
+}
+
+// The trait method other crates call maps the HTTP 500 not-found answer to None instead of an error.
+#[test]
+fn get_raw_transaction_info_maps_http_500_not_found_to_none() {
+    let txid = "0257d69ee3f36d47b98aabda42cca1501da5e86af48f16f759fd458bbc011310"
+        .parse()
+        .unwrap();
+    let result = with_unknown_transaction_response(500, true, |client| {
+        client.get_raw_transaction_info(&txid)
+    });
+    assert!(
+        matches!(result, Ok(None)),
+        "expected Ok(None) for an unknown transaction, got {result:?}"
     );
 }
 
@@ -136,8 +151,7 @@ fn bitcoin_client_api_preserves_the_same_rpc_error() {
     assert!(
         matches!(
             &error,
-            BitcoinClientError::RpcError(Error::JsonRpc(jsonrpc::Error::Rpc(rpc)))
-                if rpc.code == -5
+            BitcoinClientError::RpcError(jsonrpc::Error::Rpc(rpc)) if rpc.code == -5
         ),
         "expected BitcoinClient API to preserve JSON-RPC -5, got {error:?}"
     );
@@ -147,7 +161,7 @@ fn bitcoin_client_api_preserves_the_same_rpc_error() {
 fn http_200_preserves_the_same_rpc_error() {
     let error = unknown_transaction_response(200, true);
     assert!(
-        matches!(&error, Error::JsonRpc(jsonrpc::Error::Rpc(rpc)) if rpc.code == -5),
+        matches!(&error, BitcoinClientError::RpcError(jsonrpc::Error::Rpc(rpc)) if rpc.code == -5),
         "expected JSON-RPC -5, got {error:?}"
     );
 }
@@ -156,7 +170,12 @@ fn http_200_preserves_the_same_rpc_error() {
 fn http_503_without_rpc_body_remains_a_transport_failure() {
     let error = unknown_transaction_response(503, false);
     assert!(
-        matches!(&error, Error::JsonRpc(jsonrpc::Error::Transport(_))),
+        matches!(
+            &error,
+            BitcoinClientError::RpcError(jsonrpc::Error::Transport(_))
+        ),
         "a genuine HTTP failure must not be treated as a missing transaction: {error:?}"
     );
+    assert!(error.is_node_unreachable());
+    assert!(!error.is_not_found());
 }
