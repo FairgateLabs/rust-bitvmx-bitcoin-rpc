@@ -21,6 +21,11 @@ mockall = "0.15.0"
 tracing = "0.1.44"
 redact = { version = "0.1", features = ["serde"] }
 
+[dev-dependencies]
+bitcoind = { git = "https://github.com/FairgateLabs/rust-bitcoind.git", tag = "v0.8.11" }
+# Enables the testing helpers in the integration tests.
+bitvmx-bitcoin-rpc = { path = ".", features = ["testing"] }
+
 [features]
 default = []
 testing = []

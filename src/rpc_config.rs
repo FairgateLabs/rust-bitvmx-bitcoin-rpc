@@ -81,6 +81,23 @@ fn is_potential_secret(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    // The URL and the credentials are kept as secrets, so printing the config does not show them.
+    #[test]
+    fn debug_hides_url_and_credentials() {
+        let config = RpcConfig::new(
+            Network::Regtest,
+            "https://node.example/secret-key".to_string(),
+            "secret-user".to_string(),
+            "secret-pass".to_string(),
+            "wallet".to_string(),
+        );
+        assert_eq!(
+            config.url.expose_secret(),
+            "https://node.example/secret-key"
+        );
+        assert!(!format!("{config:?}").contains("secret"));
+    }
+
     #[test]
     fn test_mask_url_secrets() {
         // Test URL with hex secret

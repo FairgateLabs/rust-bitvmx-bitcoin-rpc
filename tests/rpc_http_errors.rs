@@ -179,3 +179,17 @@ fn http_503_without_rpc_body_remains_a_transport_failure() {
     assert!(error.is_node_unreachable());
     assert!(!error.is_not_found());
 }
+
+// A successful HTTP status with a body that is not JSON is a parsing failure, not a transport failure.
+#[test]
+fn http_200_without_rpc_body_is_a_json_error() {
+    let error = unknown_transaction_response(200, false);
+    assert!(
+        matches!(
+            &error,
+            BitcoinClientError::RpcError(jsonrpc::Error::Json(_))
+        ),
+        "expected a JSON error, got {error:?}"
+    );
+    assert!(!error.is_node_unreachable());
+}

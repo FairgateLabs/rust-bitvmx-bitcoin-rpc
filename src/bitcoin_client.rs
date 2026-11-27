@@ -927,142 +927,117 @@ impl BitcoinClientApi for BitcoinClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
-    // Only the node's "not found" answer is not found. Any other RPC error, or a failure to reach the node, is not.
-    #[test]
-    fn test_is_not_found() {
-        let rpc_error = |code| {
-            BitcoinClientError::RpcError(jsonrpc::Error::Rpc(jsonrpc::error::RpcError {
-                code,
-                message: "error".to_string(),
-                data: None,
-            }))
-        };
-
-        assert!(rpc_error(-5).is_not_found());
-        // Invalid parameter, and the node still warming up.
-        assert!(!rpc_error(-8).is_not_found());
-        assert!(!rpc_error(-28).is_not_found());
-
-        let unreachable = BitcoinClientError::RpcError(jsonrpc::Error::Transport(Box::new(
-            std::io::Error::other("connection refused"),
-        )));
-        assert!(!unreachable.is_not_found());
-    }
-
-    // Only a failure to reach the node counts as unreachable. A node that answers with an error is reachable.
-    #[test]
-    fn test_is_node_unreachable() {
-        let unreachable = BitcoinClientError::RpcError(jsonrpc::Error::Transport(Box::new(
-            std::io::Error::other("connection refused"),
-        )));
-        assert!(unreachable.is_node_unreachable());
-
-        let rejected =
-            BitcoinClientError::RpcError(jsonrpc::Error::Rpc(jsonrpc::error::RpcError {
-                code: -8,
-                message: "rejected".to_string(),
-                data: None,
-            }));
-        assert!(!rejected.is_node_unreachable());
-    }
-
-    // A node that cannot be reached is an error, not a tx the node does not know.
-    #[test]
-    fn test_get_tx_confirmations_unreachable_node() {
-        // Bind to a free port and release it, so nothing is listening there and the connection is refused.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let bitcoin_client = BitcoinClient::new(
-            &Secret::new(format!("http://127.0.0.1:{port}")),
-            &Secret::new("foo".to_string()),
-            &Secret::new("rpcpassword".to_string()),
+    /// A client on port 0, which never accepts connections, so every call to the node fails.
+    fn offline_client() -> BitcoinClient {
+        let empty = Secret::new(String::new());
+        BitcoinClient::new(
+            &Secret::new("http://127.0.0.1:0".to_string()),
+            &empty,
+            &empty,
         )
-        .unwrap();
+        .unwrap()
+    }
 
-        let tx_id = Txid::from_str(&"11".repeat(32)).unwrap();
-        let result = bitcoin_client.get_tx_confirmations(&tx_id);
-        assert!(
-            matches!(result, Err(BitcoinClientError::RpcError(_))),
-            "expected an RPC error, got {result:?}"
+    // A node that cannot be reached is an error, never a "not found" answer such as None or false. The exceptions are
+    // tx_exists and get_transaction, whose contract is to answer false and None whenever the node cannot return the tx.
+    #[test]
+    fn unreachable_node_is_an_error() {
+        let client = offline_client();
+        let txid = Txid::from_str(&"11".repeat(32)).unwrap();
+        let hash = BlockHash::from_str(&"22".repeat(32)).unwrap();
+        let address = Address::from_str("mkHS9ne12qx9pS9VojpwU5xtRd4T7X7ZUt")
+            .unwrap()
+            .assume_checked();
+        let outpoint = bitcoin::OutPoint::new(txid, 0);
+
+        assert!(client
+            .get_tx_confirmations(&txid)
+            .unwrap_err()
+            .is_node_unreachable());
+        assert!(client.get_raw_transaction_info(&txid).is_err());
+        assert!(client.get_mempool_entry(&txid).is_err());
+        assert!(client.check_in_mempool(&txid).is_err());
+        assert!(!client.tx_exists(&txid));
+        assert!(client.get_transaction(&txid).unwrap().is_none());
+
+        assert!(client.get_tip_height().is_err());
+        assert!(client.get_block_by_height(&1).is_err());
+        assert!(client.get_block_header_info(&hash).is_err());
+        assert!(client.is_txindex_enabled().is_err());
+        assert!(client.invalidate_block(&hash).is_err());
+        assert!(client.get_raw_transaction_verbosity_two(&txid).is_err());
+        assert!(client.get_tx_out(&txid, 0).is_err());
+        assert!(client.is_utxo_spent(&txid, 0, true).is_err());
+        assert!(matches!(
+            client.send_transaction(&bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![],
+                output: vec![],
+            }),
+            Err(BitcoinClientError::FailedToSendTransaction { .. })
+        ));
+        assert!(client.estimate_smart_fee().is_err());
+        assert!(client.get_raw_mempool().is_err());
+        assert!(client.fund_address(&address, Amount::ONE_SAT).is_err());
+        assert!(client.mine_blocks(1).is_err());
+        assert!(client.init_wallet("test_wallet").is_err());
+        assert!(matches!(
+            client.create_wallet_only("test_wallet"),
+            Err(BitcoinClientError::FailedToListWallets { .. })
+        ));
+
+        assert!(client.get_block_count().is_err());
+        assert!(client.get_balance().is_err());
+        assert!(client.list_wallets().is_err());
+        assert!(client.dump_privkey(&address).is_err());
+        assert!(client.mine_empty_block(&address).is_err());
+        assert!(client.set_mock_time(0).is_err());
+        assert!(client.send_to_address(&address, Amount::ONE_SAT).is_err());
+        assert!(client.reconsider_block(&hash).is_err());
+        assert!(client.lock_unspent(&outpoint).is_err());
+        assert!(client.unlock_unspent_all().is_err());
+        assert!(client.get_wallet_address().is_err());
+        assert!(client.get_best_block_hash().is_err());
+        assert!(client.prioritise_transaction(&txid, 1).is_err());
+        assert!(client
+            .sign_spend(&[outpoint], &Default::default(), &[])
+            .is_err());
+    }
+
+    // A wallet name goes into the URL path, so only letters, digits, '_' and '-' are accepted. An empty name means no wallet.
+    #[test]
+    fn new_with_wallet_validates_the_name() {
+        let url = Secret::new("http://127.0.0.1:0".to_string());
+        let empty = Secret::new(String::new());
+        assert!(BitcoinClient::new_with_wallet(&url, &empty, &empty, "test_wallet-1").is_ok());
+        assert!(BitcoinClient::new_with_wallet(&url, &empty, &empty, "").is_ok());
+        assert!(matches!(
+            BitcoinClient::new_with_wallet(&url, &empty, &empty, "../other"),
+            Err(BitcoinClientError::InvalidWalletName { .. })
+        ));
+    }
+
+    // The address is the P2WPKH of the key, computed locally. P2WPKH needs a compressed key, so an uncompressed one fails.
+    #[test]
+    fn get_new_address_is_p2wpkh() {
+        let secret = SecretKey::from_slice(&[0x42; 32]).unwrap();
+        let pk = PublicKey::new(secret.public_key(&Secp256k1::new()));
+        let expected = Address::p2wpkh(
+            &CompressedPublicKey::try_from(pk).unwrap(),
+            Network::Regtest,
         );
-    }
 
-    #[test]
-    #[ignore]
-    fn mine_blocks_to_address_test() {
-        let bitcoin_client = BitcoinClient::new(
-            &Secret::new("http://127.0.0.1:18443".to_string()),
-            &Secret::new("foo".to_string()),
-            &Secret::new("rpcpassword".to_string()),
-        )
-        .unwrap();
-
-        let blocks = bitcoin_client.get_tip_height().unwrap();
-        println!("Blocks: {:?}", blocks);
-        let wallet = bitcoin_client.init_wallet("test_wallet").unwrap();
-        bitcoin_client.mine_blocks_to_address(1, &wallet).unwrap();
-
-        let blocks = bitcoin_client.get_tip_height().unwrap();
-        println!("Blocks: {:?}", blocks);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_init_wallet() -> Result<(), BitcoinClientError> {
-        let bitcoin_client = BitcoinClient::new(
-            &Secret::new("http://127.0.0.1:18443".to_string()),
-            &Secret::new("foo".to_string()),
-            &Secret::new("rpcpassword".to_string()),
-        )
-        .unwrap();
-
-        // Use a unique wallet name to avoid collisions
-        let wallet_name = "test_wallet";
-
-        // Attempt to initialize the wallet
-        let result_address = bitcoin_client.init_wallet(wallet_name);
-
-        println!("Result address: {:?}", result_address);
-        assert!(result_address.is_ok());
-        let address = result_address.unwrap();
-        println!("Address: {:?}", address);
-
-        // Attempt to initialize the wallet
-        let result_address_2 = bitcoin_client.init_wallet(wallet_name);
-
-        assert!(result_address_2.is_ok());
-        let address_2 = result_address_2.unwrap();
-        assert_ne!(address, address_2);
-        println!("Address 2: {:?}", address_2);
-
-        // Init wallet with different name
-        let result_address_3 = bitcoin_client.init_wallet("test_wallet_2");
-
-        println!("Result address 3: {:?}", result_address_3);
-        assert!(result_address_3.is_ok());
-        let address_3 = result_address_3.unwrap();
-        println!("Address 3: {:?}", address_3);
-
-        // Init wallet with different name
-        let result_address_3 = bitcoin_client.init_wallet("test_wallet_2");
-
-        println!("Result address 3: {:?}", result_address_3);
-        assert!(result_address_3.is_ok());
-        let address_3 = result_address_3.unwrap();
-        println!("Address 3: {:?}", address_3);
-
-        // Init wallet with different name
-        let result_address_3 = bitcoin_client.init_wallet("test_wallet_2");
-
-        println!("Result address 3: {:?}", result_address_3);
-        assert!(result_address_3.is_ok());
-        let address_3 = result_address_3.unwrap();
-        println!("Address 3: {:?}", address_3);
-
-        Ok(())
+        let client = offline_client();
+        assert_eq!(
+            client.get_new_address(pk, Network::Regtest).unwrap(),
+            expected
+        );
+        assert!(matches!(
+            client.get_new_address(PublicKey::new_uncompressed(pk.inner), Network::Regtest),
+            Err(BitcoinClientError::FailedToConvertPublicKey { .. })
+        ));
     }
 }

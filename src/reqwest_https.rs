@@ -278,17 +278,24 @@ mod tests {
             .url("http://127.0.0.1:0")
             .unwrap()
             .build();
-        let v21 =
-            jsonrpc::Client::with_transport(transport.clone()).call::<u64>("getblockcount", None);
-        let v18 = jsonrpc_v18::Client::with_transport(transport).call::<u64>("getblockcount", None);
+        let v21 = jsonrpc::Client::with_transport(transport.clone());
+        let v18 = jsonrpc_v18::Client::with_transport(transport);
+        let v21_call = v21.call::<u64>("getblockcount", None);
+        let v18_call = v18.call::<u64>("getblockcount", None);
         assert!(
-            matches!(v21, Err(jsonrpc::Error::Transport(_))),
-            "got {v21:?}"
+            matches!(v21_call, Err(jsonrpc::Error::Transport(_))),
+            "got {v21_call:?}"
         );
         assert!(
-            matches!(v18, Err(jsonrpc_v18::Error::Transport(_))),
-            "got {v18:?}"
+            matches!(v18_call, Err(jsonrpc_v18::Error::Transport(_))),
+            "got {v18_call:?}"
         );
+
+        // Batches go through the same transport.
+        let v21_batch = v21.send_batch(&[v21.build_request("getblockcount", None)]);
+        let v18_batch = v18.send_batch(&[v18.build_request("getblockcount", None)]);
+        assert!(matches!(v21_batch, Err(jsonrpc::Error::Transport(_))));
+        assert!(matches!(v18_batch, Err(jsonrpc_v18::Error::Transport(_))));
     }
 
     #[test]
@@ -297,7 +304,22 @@ mod tests {
             .url("https://node.example/secret-key")
             .unwrap()
             .basic_auth("user".into(), Some("secret-pass".into()))
+            .header("x-api-key".into(), "secret-header".into())
             .build();
         assert!(!format!("{transport:?}").contains("secret"));
+    }
+
+    // An HTTP error without an RPC body shows its status and body, and keeps itself as the source.
+    #[test]
+    fn http_error_display_and_source() {
+        let error = Error::Http(HttpError {
+            status_code: 503,
+            body: "upstream unavailable".into(),
+        });
+        assert_eq!(
+            error.to_string(),
+            "http (status: 503, body: upstream unavailable)"
+        );
+        assert!(error::Error::source(&error).is_some());
     }
 }

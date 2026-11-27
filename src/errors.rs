@@ -89,3 +89,58 @@ impl BitcoinClientError {
 pub(crate) fn invalid_response(error: impl std::fmt::Display) -> BitcoinClientError {
     BitcoinClientError::InvalidResponse(error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use corepc_types::v29::GetRawTransaction;
+
+    /// An error answer from the node with the given RPC code.
+    fn rpc_error(code: i32) -> BitcoinClientError {
+        BitcoinClientError::RpcError(jsonrpc::Error::Rpc(jsonrpc::error::RpcError {
+            code,
+            message: "error".to_string(),
+            data: None,
+        }))
+    }
+
+    /// A failure to reach the node.
+    fn unreachable() -> BitcoinClientError {
+        BitcoinClientError::RpcError(jsonrpc::Error::Transport(Box::new(
+            std::io::Error::other("connection refused"),
+        )))
+    }
+
+    // Only the node's "not found" answer (-5) is not found, and only a failure to reach the node is unreachable. Other
+    // codes, like invalid parameter (-8) or the node still warming up (-28), are neither.
+    #[test]
+    fn not_found_and_unreachable_are_told_apart() {
+        assert!(rpc_error(-5).is_not_found());
+        assert!(!rpc_error(-5).is_node_unreachable());
+        for code in [-8, -28] {
+            assert!(!rpc_error(code).is_not_found());
+            assert!(!rpc_error(code).is_node_unreachable());
+        }
+        assert!(unreachable().is_node_unreachable());
+        assert!(!unreachable().is_not_found());
+    }
+
+    // A node answer that fails to convert, like a transaction that is not valid hex, becomes InvalidResponse and keeps
+    // the conversion error in its message. It is neither a not-found answer nor an unreachable node.
+    #[test]
+    fn invalid_response_keeps_the_conversion_error() {
+        let conversion = GetRawTransaction("not hex".to_string())
+            .into_model()
+            .unwrap_err();
+        let error = invalid_response(&conversion);
+        assert!(
+            matches!(&error, BitcoinClientError::InvalidResponse(message) if *message == conversion.to_string())
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("Unexpected node response: {conversion}")
+        );
+        assert!(!error.is_not_found());
+        assert!(!error.is_node_unreachable());
+    }
+}
