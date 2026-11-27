@@ -133,7 +133,8 @@ pub trait BitcoinClientApi {
     //  Transactions
     // ================================
 
-    /// True if the node knows the transaction, in the mempool or through the transaction index.
+    /// True if the node knows the transaction, in the mempool or through the transaction index. Any error, including an
+    /// unreachable node, returns false.
     fn tx_exists(&self, tx_id: &Txid) -> bool;
 
     /// Transaction `txid`, or `None` when the node cannot return it.
@@ -300,7 +301,7 @@ pub trait BitcoinClientApi {
     #[cfg(feature = "testing")]
     fn get_best_block_hash(&self) -> Result<BlockHash, BitcoinClientError>;
 
-    /// Raises the fee the node's mempool counts for `txid` by `fee_delta_sats`, without changing the transaction.
+    /// Changes the fee the node's mempool counts for `txid` by `fee_delta_sats`, without changing the transaction.
     #[cfg(feature = "testing")]
     fn prioritise_transaction(
         &self,
@@ -310,7 +311,8 @@ pub trait BitcoinClientApi {
 
     /// Builds a transaction spending `inputs` to `outputs` (address to amount) and signs it with the loaded wallet,
     /// without broadcasting it. `prevouts` describes inputs the wallet cannot find by itself, such as an output of an
-    /// unconfirmed parent. Pass an empty slice when spending confirmed outputs.
+    /// unconfirmed parent. Pass an empty slice when spending confirmed outputs. An incomplete signature is returned as
+    /// `FailedToSendTransaction`.
     #[cfg(feature = "testing")]
     fn sign_spend(
         &self,
@@ -675,7 +677,7 @@ impl BitcoinClientApi for BitcoinClient {
     }
 
     fn mine_blocks(&self, block_num: u64) -> Result<(), BitcoinClientError> {
-        // send to an empty address to avoid changing the balance of a wallet
+        // Mines to an address no wallet owns, so no wallet balance changes.
         let address = Address::from_str("mkHS9ne12qx9pS9VojpwU5xtRd4T7X7ZUt")?
             .require_network(Network::Regtest)?;
 

@@ -100,9 +100,9 @@ let amount = Amount::from_sat(10_000);
 
 let (tx, vout) = client.fund_address(&address, amount)?;
 
-let txid = client.send_transaction(&tx)?;
+let exists = client.tx_exists(&tx.compute_txid());
 
-let exists = client.tx_exists(&txid);
+let txid = client.send_transaction(&signed_tx)?;
 ```
 
 #### Handling errors
@@ -143,7 +143,7 @@ mock.expect_get_tip_height().returning(|| Ok(100));
 
 1. Clone the repository
 2. Build: `cargo build`
-3. Run the tests: `cargo test` (add `--features testing` to include the testing helpers)
+3. Run the tests: `cargo test`. The integration tests start a regtest node in Docker, so Docker must be running. The `testing` helpers are always enabled for tests.
 
 ## Contributing
 Contributions are welcome! Please open an issue or submit a pull request on GitHub.
