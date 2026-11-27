@@ -5,7 +5,10 @@ edition = "2021"
 
 [dependencies]
 bitcoin = "0.32.102"
-bitcoincore-rpc = "0.19"
+jsonrpc = { version = "0.21", default-features = false }
+# Kept only so reqwest_https can also serve the wallet, whose BDK still uses the jsonrpc 0.18 Transport trait.
+jsonrpc_v18 = { package = "jsonrpc", version = "0.18", default-features = false }
+corepc-types = "0.16"
 thiserror = "2.0.20"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -17,6 +20,11 @@ reqwest = { version = "0.13.4", features = [
 mockall = "0.15.0"
 tracing = "0.1.44"
 redact = { version = "0.1", features = ["serde"] }
+
+[dev-dependencies]
+bitcoind = { git = "https://github.com/FairgateLabs/rust-bitcoind.git", tag = "v0.8.11" }
+# Enables the testing helpers in the integration tests.
+bitvmx-bitcoin-rpc = { path = ".", features = ["testing"] }
 
 [features]
 default = []

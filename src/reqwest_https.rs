@@ -1,40 +1,57 @@
+//! HTTPS transport for Bitcoin Core JSON-RPC built on reqwest, which reuses connections between calls.
+//!
+//! TODO: The same transport serves two versions of the `jsonrpc` crate: 0.21, used by this crate's `BitcoinClient`, and 0.18,
+//! used by BDK's `bdk_bitcoind_rpc` in the wallet. Each version defines its own `Transport` trait, so this file
+//! implements both on the same struct. The 0.18 implementation can be removed once BDK moves to the newer `jsonrpc`.
+
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{error, fmt};
 
-use bitcoincore_rpc::jsonrpc::{self, base64, Request, Response, Transport};
 use reqwest::blocking::Client;
 
+use crate::rpc_config::mask_url_secrets;
+
 const DEFAULT_URL: &str = "http://localhost";
-const DEFAULT_PORT: u16 = 8332; // the default RPC port for bitcoind.
+const DEFAULT_PORT: u16 = 8332; // The default RPC port for bitcoind.
 const DEFAULT_TIMEOUT_SECONDS: u64 = 15;
 
 /// An HTTPS transport that uses [`reqwest`] and is useful for running a bitcoind RPC client.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ReqwestHttpsTransport {
     /// URL of the RPC server.
     url: String,
-    /// The value of the `Authorization` HTTP header, i.e., a base64 encoding of 'user:password'.
-    basic_auth: Option<String>,
+    /// Basic auth user and optional password.
+    basic_auth: Option<(String, Option<String>)>,
     /// Headers to be added to the request.
     headers: HashMap<String, String>,
     /// HTTP client with connection pooling
     client: Client,
 }
 
+impl fmt::Debug for ReqwestHttpsTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The URL can carry an API key and the auth holds a password, so neither is printed.
+        f.write_str("ReqwestHttpsTransport")
+    }
+}
+
+fn build_client(timeout: Duration) -> Client {
+    Client::builder()
+        .timeout(timeout)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(10)
+        .build()
+        .expect("Failed to create reqwest client")
+}
+
 impl Default for ReqwestHttpsTransport {
     fn default() -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))
-            .pool_idle_timeout(Duration::from_secs(30))
-            .build()
-            .expect("Failed to create reqwest client");
-
         ReqwestHttpsTransport {
             url: format!("{}:{}", DEFAULT_URL, DEFAULT_PORT),
             basic_auth: None,
             headers: HashMap::new(),
-            client,
+            client: build_client(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)),
         }
     }
 }
@@ -56,8 +73,8 @@ impl ReqwestHttpsTransport {
     {
         let mut request = self.client.post(&self.url).json(&req);
 
-        if let Some(auth) = &self.basic_auth {
-            request = request.header("Authorization", auth);
+        if let Some((user, pass)) = &self.basic_auth {
+            request = request.basic_auth(user, pass.as_ref());
         }
 
         for (key, value) in &self.headers {
@@ -83,17 +100,42 @@ impl ReqwestHttpsTransport {
     }
 }
 
-impl Transport for ReqwestHttpsTransport {
-    fn send_request(&self, req: Request) -> Result<Response, jsonrpc::Error> {
+// Used by this crate's BitcoinClient.
+impl jsonrpc::Transport for ReqwestHttpsTransport {
+    fn send_request(&self, req: jsonrpc::Request) -> Result<jsonrpc::Response, jsonrpc::Error> {
         Ok(self.request(req)?)
     }
 
-    fn send_batch(&self, reqs: &[Request]) -> Result<Vec<Response>, jsonrpc::Error> {
+    fn send_batch(
+        &self,
+        reqs: &[jsonrpc::Request],
+    ) -> Result<Vec<jsonrpc::Response>, jsonrpc::Error> {
         Ok(self.request(reqs)?)
     }
 
     fn fmt_target(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.url)
+        write!(f, "{}", mask_url_secrets(&self.url))
+    }
+}
+
+// Used by the wallet, whose BDK version still builds its client from jsonrpc 0.18.
+impl jsonrpc_v18::Transport for ReqwestHttpsTransport {
+    fn send_request(
+        &self,
+        req: jsonrpc_v18::Request,
+    ) -> Result<jsonrpc_v18::Response, jsonrpc_v18::Error> {
+        Ok(self.request(req)?)
+    }
+
+    fn send_batch(
+        &self,
+        reqs: &[jsonrpc_v18::Request],
+    ) -> Result<Vec<jsonrpc_v18::Response>, jsonrpc_v18::Error> {
+        Ok(self.request(reqs)?)
+    }
+
+    fn fmt_target(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", mask_url_secrets(&self.url))
     }
 }
 
@@ -113,12 +155,7 @@ impl Builder {
 
     /// Sets the timeout after which requests will abort if they aren't finished.
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.tp.client = Client::builder()
-            .timeout(timeout)
-            .pool_idle_timeout(Duration::from_secs(30))
-            .pool_max_idle_per_host(10)
-            .build()
-            .expect("Failed to create reqwest client");
+        self.tp.client = build_client(timeout);
         self
     }
 
@@ -130,12 +167,7 @@ impl Builder {
 
     /// Adds authentication information to the transport.
     pub fn basic_auth(mut self, user: String, pass: Option<String>) -> Self {
-        let mut s = user;
-        s.push(':');
-        if let Some(ref pass) = pass {
-            s.push_str(pass.as_ref());
-        }
-        self.tp.basic_auth = Some(format!("Basic {}", base64::encode(s.as_bytes())));
+        self.tp.basic_auth = Some((user, pass));
         self
     }
 
@@ -216,7 +248,8 @@ impl From<serde_json::Error> for Error {
 
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Self {
-        Error::Reqwest(e)
+        // A reqwest error prints the URL it failed on, which can carry an API key, so the URL is dropped.
+        Error::Reqwest(e.without_url())
     }
 }
 
@@ -226,5 +259,93 @@ impl From<Error> for jsonrpc::Error {
             Error::Json(e) => jsonrpc::Error::Json(e),
             e => jsonrpc::Error::Transport(Box::new(e)),
         }
+    }
+}
+
+impl From<Error> for jsonrpc_v18::Error {
+    fn from(e: Error) -> jsonrpc_v18::Error {
+        match e {
+            Error::Json(e) => jsonrpc_v18::Error::Json(e),
+            e => jsonrpc_v18::Error::Transport(Box::new(e)),
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn works_as_both_jsonrpc_transports() {
+        // Port 0 never accepts connections, so each call fails inside this transport after the client accepted it.
+        let transport = ReqwestHttpsTransport::builder()
+            .url("http://127.0.0.1:0")
+            .unwrap()
+            .build();
+        let v21 = jsonrpc::Client::with_transport(transport.clone());
+        let v18 = jsonrpc_v18::Client::with_transport(transport);
+        let v21_call = v21.call::<u64>("getblockcount", None);
+        let v18_call = v18.call::<u64>("getblockcount", None);
+        assert!(
+            matches!(v21_call, Err(jsonrpc::Error::Transport(_))),
+            "got {v21_call:?}"
+        );
+        assert!(
+            matches!(v18_call, Err(jsonrpc_v18::Error::Transport(_))),
+            "got {v18_call:?}"
+        );
+
+        // Batches go through the same transport.
+        let v21_batch = v21.send_batch(&[v21.build_request("getblockcount", None)]);
+        let v18_batch = v18.send_batch(&[v18.build_request("getblockcount", None)]);
+        assert!(matches!(v21_batch, Err(jsonrpc::Error::Transport(_))));
+        assert!(matches!(v18_batch, Err(jsonrpc_v18::Error::Transport(_))));
+    }
+
+    #[test]
+    fn debug_does_not_print_url_or_auth() {
+        let transport = ReqwestHttpsTransport::builder()
+            .url("https://node.example/secret-key")
+            .unwrap()
+            .basic_auth("user".into(), Some("secret-pass".into()))
+            .header("x-api-key".into(), "secret-header".into())
+            .build();
+        assert!(!format!("{transport:?}").contains("secret"));
+    }
+
+    // A failed request and the jsonrpc clients' debug output do not show the API key in the URL.
+    #[test]
+    fn errors_and_targets_hide_the_api_key() {
+        // A long hex string, which is what the URL masking treats as a secret.
+        let key = "ab".repeat(20);
+        let transport = ReqwestHttpsTransport::builder()
+            .url(&format!("http://127.0.0.1:0/v2/{key}"))
+            .unwrap()
+            .build();
+        let v21 = jsonrpc::Client::with_transport(transport.clone());
+        let v18 = jsonrpc_v18::Client::with_transport(transport);
+
+        let v21_error = v21.call::<u64>("getblockcount", None).unwrap_err();
+        let v18_error = v18.call::<u64>("getblockcount", None).unwrap_err();
+        for text in [
+            format!("{v21_error} {v21_error:?}"),
+            format!("{v18_error} {v18_error:?}"),
+            format!("{v21:?} {v18:?}"),
+        ] {
+            assert!(!text.contains(&key), "leaked in {text}");
+        }
+    }
+
+    // An HTTP error without an RPC body shows its status and body, and keeps itself as the source.
+    #[test]
+    fn http_error_display_and_source() {
+        let error = Error::Http(HttpError {
+            status_code: 503,
+            body: "upstream unavailable".into(),
+        });
+        assert_eq!(
+            error.to_string(),
+            "http (status: 503, body: upstream unavailable)"
+        );
+        assert!(error::Error::source(&error).is_some());
     }
 }

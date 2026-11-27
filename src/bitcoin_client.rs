@@ -1,26 +1,27 @@
 use std::str::FromStr;
 
 use crate::errors::BitcoinClientError;
-use crate::reqwest_https::ReqwestHttpsTransport;
-use crate::rpc_config::RpcConfig;
+use crate::rpc::Rpc;
+use crate::rpc_config::{mask_url_secrets, RpcConfig};
 use crate::types::{BlockHeight, BlockInfo};
-use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
     Address, Amount, Block, BlockHash, CompressedPublicKey, Network, PublicKey, Transaction, Txid,
 };
-use bitcoincore_rpc::json::{EstimateMode, GetBlockHeaderResult, GetBlockchainInfoResult};
-use bitcoincore_rpc::json::{GetMempoolEntryResult, GetRawTransactionResult, GetTxOutResult};
-use bitcoincore_rpc::{jsonrpc, Client, RpcApi};
+use corepc_types::model::{
+    GetBlockHeaderVerbose, GetBlockchainInfo, GetMempoolEntry, GetRawTransactionVerbose, GetTxOut,
+};
 use mockall::automock;
 use redact::Secret;
+use reqwest::Url;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 pub struct BitcoinClient {
-    pub client: Client,
+    client: Rpc,
 }
 
 impl BitcoinClient {
+    /// Connects to the node at `url`. Empty `user` or `pass` means no credentials are sent.
     pub fn new(
         url: &Secret<String>,
         user: &Secret<String>,
@@ -31,22 +32,13 @@ impl BitcoinClient {
             false => Some(pass),
         };
 
-        let transport = if !user.expose_secret().is_empty() {
-            ReqwestHttpsTransport::builder()
-                .url(url.expose_secret())?
-                .basic_auth(
-                    user.expose_secret().to_owned(),
-                    pass.map(|p| p.expose_secret().to_owned()),
-                )
-                .build()
-        } else {
-            ReqwestHttpsTransport::builder()
-                .url(url.expose_secret())?
-                .build()
-        };
-
-        let from_jsonrpc = jsonrpc::client::Client::with_transport(transport);
-        let client = Client::from_jsonrpc(from_jsonrpc);
+        let auth = (!user.expose_secret().is_empty()).then(|| {
+            (
+                user.expose_secret().to_owned(),
+                pass.map(|p| p.expose_secret().to_owned()),
+            )
+        });
+        let client = Rpc::new(url.expose_secret(), auth)?;
 
         info!(
             "[BitcoinClient] Initialized for url: {}",
@@ -56,47 +48,69 @@ impl BitcoinClient {
         Ok(Self { client })
     }
 
+    /// Connects using the url and credentials of `config`.
     pub fn new_from_config(config: &RpcConfig) -> Result<Self, BitcoinClientError> {
         Self::new(&config.url, &config.username, &config.password)
     }
 
+    /// Connects to the wallet `wallet_name` of the node. An empty name connects to the node itself.
     pub fn new_with_wallet(
         url: &Secret<String>,
         user: &Secret<String>,
         pass: &Secret<String>,
         wallet_name: &str,
     ) -> Result<Self, BitcoinClientError> {
-        let url = if !wallet_name.is_empty() {
-            if !wallet_name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                return Err(BitcoinClientError::InvalidWalletName {
-                    wallet_name: wallet_name.to_string(),
-                });
-            }
-
-            format!("{}/wallet/{}", url.expose_secret(), wallet_name)
-        } else {
-            url.expose_secret().to_string()
-        };
-
+        let url = wallet_url(url.expose_secret(), wallet_name)?;
         Self::new(&Secret::new(url), user, pass)
     }
 }
 
+/// URL of the wallet `wallet_name` on the node at `url`: `/wallet/<name>` is added to the path, keeping any query at the
+/// end. An empty name returns `url` unchanged.
+fn wallet_url(url: &str, wallet_name: &str) -> Result<String, BitcoinClientError> {
+    if wallet_name.is_empty() {
+        return Ok(url.to_string());
+    }
+    if !wallet_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(BitcoinClientError::InvalidWalletName {
+            wallet_name: wallet_name.to_string(),
+        });
+    }
+
+    let mut parsed = Url::parse(url).map_err(|_| BitcoinClientError::InvalidUrl)?;
+    parsed
+        .path_segments_mut()
+        .map_err(|_| BitcoinClientError::InvalidUrl)?
+        // A trailing "/" leaves an empty last segment, which is dropped so the path does not get "//".
+        .pop_if_empty()
+        .push("wallet")
+        .push(wallet_name);
+    Ok(parsed.to_string())
+}
+
 #[automock]
 pub trait BitcoinClientApi {
+    // ================================
+    //  Chain
+    // ================================
+
+    /// Height of the chain tip.
     fn get_tip_height(&self) -> Result<BlockHeight, BitcoinClientError>;
 
+    /// Block at `height` in the active chain, with its hash and the hash of its parent.
     fn get_block_by_height(
         &self,
         height: &BlockHeight,
     ) -> Result<Option<BlockInfo>, BitcoinClientError>;
 
+    /// Hash of the block at `height` in the active chain.
     fn get_block_id_by_height(&self, height: &BlockHeight)
         -> Result<BlockHash, BitcoinClientError>;
 
+    /// Full block `hash`.
     fn get_block_by_hash(&self, hash: &BlockHash) -> Result<Block, BitcoinClientError>;
 
     /// Header of the block with this hash, via `getblockheader`: its height and confirmations among other fields,
@@ -104,13 +118,52 @@ pub trait BitcoinClientApi {
     fn get_block_header_info(
         &self,
         hash: &BlockHash,
-    ) -> Result<GetBlockHeaderResult, BitcoinClientError>;
+    ) -> Result<GetBlockHeaderVerbose, BitcoinClientError>;
 
-    fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResult, BitcoinClientError>;
+    /// Chain name, height and sync state.
+    fn get_blockchain_info(&self) -> Result<GetBlockchainInfo, BitcoinClientError>;
 
+    /// True iff the node has the transaction index (`-txindex`) enabled, via `getindexinfo`.
+    fn is_txindex_enabled(&self) -> Result<bool, BitcoinClientError>;
+
+    /// Marks block `hash` as invalid so the node reorgs away from it. Regtest only.
+    fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError>;
+
+    // ================================
+    //  Transactions
+    // ================================
+
+    /// True if the node knows the transaction, in the mempool or through the transaction index. Any error, including an
+    /// unreachable node, returns false.
     fn tx_exists(&self, tx_id: &Txid) -> bool;
 
-    fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError>;
+    /// Transaction `txid`, or `None` when the node cannot return it.
+    fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError>;
+
+    /// Verbose `getrawtransaction`. `None` when the node does not know the transaction. Any other failure is returned as an error.
+    fn get_raw_transaction_info(
+        &self,
+        tx_id: &Txid,
+    ) -> Result<Option<GetRawTransactionVerbose>, BitcoinClientError>;
+
+    /// Verbosity 2 `getrawtransaction` (Bitcoin Core 25.0 or later), returned as untyped JSON.
+    fn get_raw_transaction_verbosity_two(
+        &self,
+        tx_id: &Txid,
+    ) -> Result<serde_json::Value, BitcoinClientError>;
+
+    /// Live `getrawtransaction` confirmation probe (requires `-txindex`). Returns:
+    /// - `None` => the tx is neither in the mempool nor in the active chain. This covers a tx the node does not
+    ///   know, and a tx the txindex still finds in a block a reorg disconnected (stale `blockhash`),
+    /// - `Some(0)` => in the mempool, unconfirmed,
+    /// - `Some(n>=1)` => confirmed in the active chain with `n` confirmations.
+    ///
+    /// Any failure other than the node answering "not found" is returned as an error, so an unreachable node is never
+    /// mistaken for a dropped tx.
+    fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError>;
+
+    /// Confirmed unspent output `txid:vout`. An error when it is not in the chain UTXO set.
+    fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOut, BitcoinClientError>;
 
     /// Real-time `gettxout` check. Returns true iff the output is not in the node's UTXO set. With `include_mempool`
     /// true that set is the mempool view (spends in the mempool count, outputs created in the mempool exist), with it
@@ -127,89 +180,88 @@ pub trait BitcoinClientApi {
         include_mempool: bool,
     ) -> Result<bool, BitcoinClientError>;
 
+    /// Broadcasts `tx` and returns its txid.
+    fn send_transaction(&self, tx: &Transaction) -> Result<Txid, BitcoinClientError>;
+
+    // ================================
+    //  Mempool
+    // ================================
+
+    /// Conservative fee rate in sat/vB to confirm in the next block. Falls back to 1 sat/vB when the node has no
+    /// estimate.
+    fn estimate_smart_fee(&self) -> Result<u64, BitcoinClientError>;
+
+    /// Mempool entry for `txid`, or `None` when the transaction is not in the mempool. Any other failure (transport,
+    /// RPC or parsing) is returned as an error.
+    fn get_mempool_entry(&self, txid: &Txid)
+        -> Result<Option<GetMempoolEntry>, BitcoinClientError>;
+
+    /// Txids of every transaction in the mempool.
+    fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError>;
+
+    /// True if the transaction is in the mempool. Any failure other than "not in the mempool" is returned as an error.
+    fn check_in_mempool(&self, txid: &Txid) -> Result<bool, BitcoinClientError>;
+
+    // ================================
+    //  Wallet and mining
+    // ================================
+
+    /// Sends `amount` to `address` from the loaded wallet and mines one block. Returns the funding tx and the output
+    /// index. Regtest only.
     fn fund_address(
         &self,
         address: &Address,
         amount: Amount,
     ) -> Result<(Transaction, u32), BitcoinClientError>;
 
-    fn send_transaction(&self, tx: &Transaction) -> Result<Txid, BitcoinClientError>;
-
-    fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError>;
-
-    /// Verbose `getrawtransaction`. `None` when the node does not know the transaction. Any other failure is returned as an error.
-    fn get_raw_transaction_info(
-        &self,
-        tx_id: &Txid,
-    ) -> Result<Option<GetRawTransactionResult>, BitcoinClientError>;
-
-    /// Live `getrawtransaction` confirmation probe (requires `-txindex`). Returns:
-    /// - `None` => the tx is neither in the mempool nor in the active chain. This covers a tx the node does not
-    ///   know, and a tx the txindex still finds in a block a reorg disconnected (stale `blockhash`),
-    /// - `Some(0)` => in the mempool, unconfirmed,
-    /// - `Some(n>=1)` => confirmed in the active chain with `n` confirmations.
-    ///
-    /// Any failure other than the node answering "not found" is returned as an error, so an unreachable node is never
-    /// mistaken for a dropped tx.
-    fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError>;
-
-    /// True iff the node has the transaction index (`-txindex`) enabled, via `getindexinfo`.
-    fn is_txindex_enabled(&self) -> Result<bool, BitcoinClientError>;
-
-    fn get_raw_transaction_verbosity_two(
-        &self,
-        tx_id: &Txid,
-    ) -> Result<serde_json::Value, BitcoinClientError>;
-
+    /// Mines `block_num` blocks to an address no wallet owns, so no balance changes. Regtest only.
     fn mine_blocks(&self, block_num: u64) -> Result<(), BitcoinClientError>;
 
+    /// Mines `block_num` blocks paying to `address`. Regtest only.
     fn mine_blocks_to_address(
         &self,
         block_num: u64,
         address: &Address,
     ) -> Result<(), BitcoinClientError>;
 
+    /// P2WPKH address of `pk` on `network`. Computed locally, the node is not called.
     fn get_new_address(
         &self,
         pk: PublicKey,
         network: Network,
     ) -> Result<Address, BitcoinClientError>;
 
+    /// Creates the wallet `wallet_name` if it does not exist and returns a new address from it.
     fn init_wallet(&self, wallet_name: &str) -> Result<Address, BitcoinClientError>;
 
+    /// Creates the wallet `wallet_name` if it does not exist.
     fn create_wallet_only(&self, wallet_name: &str) -> Result<(), BitcoinClientError>;
 
-    fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError>;
+    // ================================
+    //  Testing
+    // ================================
 
-    fn estimate_smart_fee(&self) -> Result<u64, BitcoinClientError>;
-
-    fn get_mempool_entry(
-        &self,
-        txid: &Txid,
-    ) -> Result<Option<GetMempoolEntryResult>, BitcoinClientError>;
-
-    fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError>;
-
-    /// True if the transaction is in the mempool. Any failure other than "not in the mempool" is returned as an error.
-    fn check_in_mempool(&self, txid: &Txid) -> Result<bool, BitcoinClientError>;
-
+    /// Height of the chain tip, as the node reports it.
     #[cfg(feature = "testing")]
     fn get_block_count(&self) -> Result<u64, BitcoinClientError>;
 
+    /// Balance of the loaded wallet.
     #[cfg(feature = "testing")]
     fn get_balance(&self) -> Result<Amount, BitcoinClientError>;
 
+    /// Names of the loaded wallets.
     #[cfg(feature = "testing")]
     fn list_wallets(&self) -> Result<Vec<String>, BitcoinClientError>;
 
+    /// Private key of a legacy wallet `address`, in WIF.
     #[cfg(feature = "testing")]
     fn dump_privkey(&self, address: &Address) -> Result<String, BitcoinClientError>;
 
-    /// Mine a single block to `address` containing no mempool transactions. Regtest/test only.
+    /// Mines a single block to `address` containing no mempool transactions.
     #[cfg(feature = "testing")]
     fn mine_empty_block(&self, address: &Address) -> Result<BlockHash, BitcoinClientError>;
 
-    /// Mine a block to `address` containing exactly `txs` plus the coinbase. Regtest/test only.
+    /// Mines a block to `address` containing exactly `txs` plus the coinbase.
     #[cfg(feature = "testing")]
     fn generate_block_with_txs(
         &self,
@@ -217,162 +269,63 @@ pub trait BitcoinClientApi {
         txs: &[Transaction],
     ) -> Result<BlockHash, BitcoinClientError>;
 
-    /// Set the node's mock clock (`setmocktime`). Regtest/test only.
+    /// Sets the node's mock clock (`setmocktime`).
     #[cfg(feature = "testing")]
     fn set_mock_time(&self, timestamp: i64) -> Result<(), BitcoinClientError>;
 
-    /// Send `amount` to `address` from the loaded wallet. Returns the txid.
+    /// Sends `amount` to `address` from the loaded wallet. Returns the txid.
     #[cfg(feature = "testing")]
     fn send_to_address(
         &self,
         address: &Address,
         amount: Amount,
     ) -> Result<Txid, BitcoinClientError>;
+
+    /// Undoes `invalidate_block`, letting the node consider the block for the active chain again.
+    #[cfg(feature = "testing")]
+    fn reconsider_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError>;
+
+    /// Locks a wallet output so the wallet does not spend it.
+    #[cfg(feature = "testing")]
+    fn lock_unspent(&self, outpoint: &bitcoin::OutPoint) -> Result<(), BitcoinClientError>;
+
+    /// Unlocks every wallet output locked with `lock_unspent`.
+    #[cfg(feature = "testing")]
+    fn unlock_unspent_all(&self) -> Result<(), BitcoinClientError>;
+
+    /// New address from the loaded wallet, checked against the node's network.
+    #[cfg(feature = "testing")]
+    fn get_wallet_address(&self) -> Result<Address, BitcoinClientError>;
+
+    /// Hash of the chain tip.
+    #[cfg(feature = "testing")]
+    fn get_best_block_hash(&self) -> Result<BlockHash, BitcoinClientError>;
+
+    /// Changes the fee the node's mempool counts for `txid` by `fee_delta_sats`, without changing the transaction.
+    #[cfg(feature = "testing")]
+    fn prioritise_transaction(
+        &self,
+        txid: &Txid,
+        fee_delta_sats: i64,
+    ) -> Result<(), BitcoinClientError>;
+
+    /// Builds a transaction spending `inputs` to `outputs` (address to amount) and signs it with the loaded wallet,
+    /// without broadcasting it. `prevouts` describes inputs the wallet cannot find by itself, such as an output of an
+    /// unconfirmed parent. Pass an empty slice when spending confirmed outputs. An incomplete signature is returned as
+    /// `FailedToSendTransaction`.
+    #[cfg(feature = "testing")]
+    fn sign_spend(
+        &self,
+        inputs: &[bitcoin::OutPoint],
+        outputs: &std::collections::HashMap<String, Amount>,
+        prevouts: &[(bitcoin::OutPoint, bitcoin::TxOut)],
+    ) -> Result<Transaction, BitcoinClientError>;
 }
 
-#[automock]
 impl BitcoinClientApi for BitcoinClient {
-    fn estimate_smart_fee(&self) -> Result<u64, BitcoinClientError> {
-        const DEFAULT_FEE_RATE: u64 = 1; // 1 sat/vB
-
-        let estimate_fee = self
-            .client
-            .estimate_smart_fee(1, Some(EstimateMode::Conservative));
-
-        match estimate_fee {
-            Ok(estimate) => {
-                match estimate.fee_rate {
-                    Some(fee_rate) => {
-                        // The fee_rate returned by estimate_smart_fee is in units of BTC per kilobyte (BTC/vkB).
-                        // To convert this to satoshis per virtual byte (sat/vB), we need to:
-                        //   1. Convert BTC to satoshis by multiplying by 100,000,000 (fee_rate.to_sat()).
-                        //   2. Convert per kilobyte to per byte by dividing by 1,000.
-                        // So, the final formula is: (BTC_per_kB * 100_000_000) / 1_000 = sat/vB
-                        let fee_rate = fee_rate.to_sat() / 1_000;
-                        debug!("Estimated smart fee: {} sat/vB", fee_rate);
-                        Ok(fee_rate)
-                    }
-                    None => {
-                        debug!(
-                            "Estimated smart fee not available, using default: {} sat/vB",
-                            DEFAULT_FEE_RATE
-                        );
-                        Ok(DEFAULT_FEE_RATE)
-                    }
-                }
-            }
-            Err(error) => {
-                error!("Error estimating smart fee: {:?}", error);
-                Err(BitcoinClientError::RpcError(error))
-            }
-        }
-    }
-
-    fn tx_exists(&self, tx_id: &Txid) -> bool {
-        let tx = self.client.get_raw_transaction_info(tx_id, None);
-        let exists = tx.is_ok();
-        debug!("tx_exists({}): {}", tx_id, exists);
-        exists
-    }
-
-    fn get_raw_transaction_info(
-        &self,
-        tx_id: &Txid,
-    ) -> Result<Option<GetRawTransactionResult>, BitcoinClientError> {
-        match self.client.get_raw_transaction_info(tx_id, None) {
-            Ok(tx) => {
-                debug!("get_raw_transaction_info({}) -> found", tx_id);
-                Ok(Some(tx))
-            }
-            Err(e) if is_not_found(&e) => {
-                debug!("get_raw_transaction_info({}) -> not found", tx_id);
-                Ok(None)
-            }
-            Err(e) => Err(BitcoinClientError::RpcError(e)),
-        }
-    }
-
-    fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError> {
-        // getrawtransaction returns RPC error -5 for an unknown txid. Only that answer means "not found", any other
-        // error is returned so a node outage does not read as a dropped tx.
-        match self.client.get_raw_transaction_info(tx_id, None) {
-            // The node checks the mempool before the txindex, so a missing blockhash means the tx is in the mempool. A
-            // blockhash with zero or missing confirmations is a block outside the active chain: the txindex keeps entries
-            // of disconnected blocks, so the tx is in neither the mempool nor the chain.
-            Ok(info) => match (info.blockhash, info.confirmations) {
-                (Some(_), Some(confs)) if confs >= 1 => {
-                    debug!("get_tx_confirmations({}) -> Some({})", tx_id, confs);
-                    Ok(Some(confs))
-                }
-                (Some(block_hash), _) => {
-                    debug!(
-                        "get_tx_confirmations({}) -> None (block {} is not in the active chain)",
-                        tx_id, block_hash
-                    );
-                    Ok(None)
-                }
-                (None, _) => {
-                    debug!("get_tx_confirmations({}) -> Some(0)", tx_id);
-                    Ok(Some(0))
-                }
-            },
-            Err(e) if is_not_found(&e) => {
-                debug!("get_tx_confirmations({}) -> None (not found)", tx_id);
-                Ok(None)
-            }
-            Err(e) => {
-                error!("get_tx_confirmations({}) failed: {:?}", tx_id, e);
-                Err(BitcoinClientError::RpcError(e))
-            }
-        }
-    }
-
-    fn is_txindex_enabled(&self) -> Result<bool, BitcoinClientError> {
-        // getindexinfo returns {} when no indices are active, or a map containing a "txindex" entry
-        // when -txindex is on.
-        let info: serde_json::Value = self.client.call("getindexinfo", &[])?;
-        Ok(info.get("txindex").is_some())
-    }
-
-    fn get_raw_transaction_verbosity_two(
-        &self,
-        tx_id: &Txid,
-    ) -> Result<serde_json::Value, BitcoinClientError> {
-        // TODO update this implementation when bitcoincore-rpc supports verbosity two raw tx natively
-        // Requires Bitcoin Core 25.0.0 or higher
-        // See https://bitcoincore.org/en/doc/25.0.0/rpc/rawtransactions/getrawtransaction/
-
-        let tx_id_str = tx_id.to_string();
-        let verbosity = 2;
-        let block_hash: Option<String> = None;
-
-        let args = vec![
-            serde_json::Value::String(tx_id_str),
-            serde_json::Value::Number(serde_json::Number::from(verbosity)),
-            match block_hash {
-                Some(hash) => serde_json::Value::String(hash),
-                None => serde_json::Value::Null,
-            },
-        ];
-
-        let tx: serde_json::Value = self.client.call("getrawtransaction", &args)?;
-        debug!(
-            "get_raw_transaction_verbosity_two({}) -> found: {}",
-            tx_id,
-            tx.get("txid")
-                .is_some_and(|v| v.as_str() == Some(&tx_id.to_string()))
-        );
-        Ok(tx)
-    }
-
-    fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResult, BitcoinClientError> {
-        let blockchain_info = self.client.get_blockchain_info()?;
-        debug!(
-            "Blockchain info: height={}, chain={}",
-            blockchain_info.blocks, blockchain_info.chain
-        );
-        Ok(blockchain_info)
-    }
+    // ================================
+    //  Chain
+    // ================================
 
     fn get_tip_height(&self) -> Result<BlockHeight, BitcoinClientError> {
         let block_height = self.client.get_block_count()?;
@@ -408,7 +361,7 @@ impl BitcoinClientApi for BitcoinClient {
     }
 
     fn get_block_by_hash(&self, hash: &BlockHash) -> Result<Block, BitcoinClientError> {
-        let block = self.client.get_by_id(hash)?;
+        let block = self.client.get_block(hash)?;
         debug!("Block for hash {}: loaded", hash);
         Ok(block)
     }
@@ -416,7 +369,7 @@ impl BitcoinClientApi for BitcoinClient {
     fn get_block_header_info(
         &self,
         hash: &BlockHash,
-    ) -> Result<GetBlockHeaderResult, BitcoinClientError> {
+    ) -> Result<GetBlockHeaderVerbose, BitcoinClientError> {
         let header = self.client.get_block_header_info(hash)?;
         debug!(
             "Block header for hash {}: height={}, confirmations={}",
@@ -425,8 +378,127 @@ impl BitcoinClientApi for BitcoinClient {
         Ok(header)
     }
 
-    fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOutResult, BitcoinClientError> {
-        let tx_out_result = self.client.get_tx_out(txid, vout, Some(false))?;
+    fn get_blockchain_info(&self) -> Result<GetBlockchainInfo, BitcoinClientError> {
+        let blockchain_info = self.client.get_blockchain_info()?;
+        debug!(
+            "Blockchain info: height={}, chain={}",
+            blockchain_info.blocks, blockchain_info.chain
+        );
+        Ok(blockchain_info)
+    }
+
+    fn is_txindex_enabled(&self) -> Result<bool, BitcoinClientError> {
+        // getindexinfo returns {} when no indices are active, or a map containing a "txindex" entry
+        // when -txindex is on.
+        let info = self.client.get_index_info()?;
+        Ok(info.get("txindex").is_some())
+    }
+
+    fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError> {
+        let blockchain_info = self.get_blockchain_info()?;
+
+        if blockchain_info.chain != Network::Regtest {
+            return Err(BitcoinClientError::InvalidNetwork);
+        }
+
+        self.client.invalidate_block(hash).map_err(|e| {
+            error!("Failed to invalidate block {}: {:?}", hash, e);
+            BitcoinClientError::FailedToInvalidateBlock {
+                error: e.to_string(),
+            }
+        })?;
+        info!("Invalidated block: {}", hash);
+        Ok(())
+    }
+
+    // ================================
+    //  Transactions
+    // ================================
+
+    fn tx_exists(&self, tx_id: &Txid) -> bool {
+        let tx = self.client.get_raw_transaction_info(tx_id);
+        let exists = tx.is_ok();
+        debug!("tx_exists({}): {}", tx_id, exists);
+        exists
+    }
+
+    fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError> {
+        let tx = self.client.get_raw_transaction(txid).ok();
+        debug!("get_transaction({}) -> found: {}", txid, tx.is_some());
+        Ok(tx)
+    }
+
+    fn get_raw_transaction_info(
+        &self,
+        tx_id: &Txid,
+    ) -> Result<Option<GetRawTransactionVerbose>, BitcoinClientError> {
+        match self.client.get_raw_transaction_info(tx_id) {
+            Ok(tx) => {
+                debug!("get_raw_transaction_info({}) -> found", tx_id);
+                Ok(Some(tx))
+            }
+            Err(e) if e.is_not_found() => {
+                debug!("get_raw_transaction_info({}) -> not found", tx_id);
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn get_raw_transaction_verbosity_two(
+        &self,
+        tx_id: &Txid,
+    ) -> Result<serde_json::Value, BitcoinClientError> {
+        // See https://bitcoincore.org/en/doc/25.0.0/rpc/rawtransactions/getrawtransaction/
+        let tx = self.client.get_raw_transaction_verbosity_two(tx_id)?;
+        debug!(
+            "get_raw_transaction_verbosity_two({}) -> found: {}",
+            tx_id,
+            tx.get("txid")
+                .is_some_and(|v| v.as_str() == Some(&tx_id.to_string()))
+        );
+        Ok(tx)
+    }
+
+    fn get_tx_confirmations(&self, tx_id: &Txid) -> Result<Option<u32>, BitcoinClientError> {
+        // getrawtransaction returns RPC error -5 for an unknown txid. Only that answer means "not found", any other
+        // error is returned so a node outage does not read as a dropped tx.
+        match self.client.get_raw_transaction_info(tx_id) {
+            // The node checks the mempool before the txindex, so a missing blockhash means the tx is in the mempool. A
+            // blockhash with zero or missing confirmations is a block outside the active chain: the txindex keeps entries
+            // of disconnected blocks, so the tx is in neither the mempool nor the chain.
+            Ok(info) => match (info.block_hash, info.confirmations) {
+                (Some(_), Some(confs)) if confs >= 1 => {
+                    debug!("get_tx_confirmations({}) -> Some({})", tx_id, confs);
+                    let confs: u32 =
+                        u32::try_from(confs).map_err(crate::errors::invalid_response)?;
+                    Ok(Some(confs))
+                }
+                (Some(block_hash), _) => {
+                    debug!(
+                        "get_tx_confirmations({}) -> None (block {} is not in the active chain)",
+                        tx_id, block_hash
+                    );
+                    Ok(None)
+                }
+                (None, _) => {
+                    debug!("get_tx_confirmations({}) -> Some(0)", tx_id);
+                    Ok(Some(0))
+                }
+            },
+            Err(e) if e.is_not_found() => {
+                debug!("get_tx_confirmations({}) -> None (not found)", tx_id);
+                Ok(None)
+            }
+            Err(e) => {
+                error!("get_tx_confirmations({}) failed: {:?}", tx_id, e);
+                Err(e)
+            }
+        }
+    }
+
+    fn get_tx_out(&self, txid: &Txid, vout: u32) -> Result<GetTxOut, BitcoinClientError> {
+        let tx_out_result = self.client.get_tx_out(txid, vout, false)?;
         debug!(
             "get_tx_out({}, {}) -> found: {}",
             txid,
@@ -444,7 +516,7 @@ impl BitcoinClientApi for BitcoinClient {
         vout: u32,
         include_mempool: bool,
     ) -> Result<bool, BitcoinClientError> {
-        let tx_out_result = self.client.get_tx_out(txid, vout, Some(include_mempool))?;
+        let tx_out_result = self.client.get_tx_out(txid, vout, include_mempool)?;
         debug!(
             "is_utxo_spent({}, {}, include_mempool={}) -> {}",
             txid,
@@ -454,6 +526,110 @@ impl BitcoinClientApi for BitcoinClient {
         );
         Ok(tx_out_result.is_none())
     }
+
+    fn send_transaction(&self, tx: &Transaction) -> Result<Txid, BitcoinClientError> {
+        let result = self.client.send_raw_transaction(tx);
+
+        match &result {
+            Ok(txid) => info!("TX sent: {} (txid: {})", tx.compute_txid(), txid),
+            Err(e) => error!("Failed to send TX: {} - {:?}", tx.compute_txid(), e),
+        }
+
+        result.map_err(|e| BitcoinClientError::FailedToSendTransaction {
+            error: e.to_string(),
+        })
+    }
+
+    // ================================
+    //  Mempool
+    // ================================
+
+    fn estimate_smart_fee(&self) -> Result<u64, BitcoinClientError> {
+        const DEFAULT_FEE_RATE: u64 = 1; // 1 sat/vB
+
+        let estimate_fee = self.client.estimate_smart_fee(1);
+
+        match estimate_fee {
+            Ok(estimate) => {
+                match estimate.fee_rate {
+                    Some(fee_rate) => {
+                        // The node answers in BTC/kvB and corepc turns it into a typed FeeRate, rounded down here to
+                        // whole sat/vB.
+                        let fee_rate = fee_rate.to_sat_per_vb_floor();
+                        debug!("Estimated smart fee: {} sat/vB", fee_rate);
+                        Ok(fee_rate)
+                    }
+                    None => {
+                        debug!(
+                            "Estimated smart fee not available, using default: {} sat/vB",
+                            DEFAULT_FEE_RATE
+                        );
+                        Ok(DEFAULT_FEE_RATE)
+                    }
+                }
+            }
+            Err(error) => {
+                error!("Error estimating smart fee: {:?}", error);
+                Err(error)
+            }
+        }
+    }
+
+    fn get_mempool_entry(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<GetMempoolEntry>, BitcoinClientError> {
+        match self.client.get_mempool_entry(txid) {
+            Ok(entry) => {
+                debug!("getmempoolentry({}) -> height: {}", txid, entry.0.height);
+                Ok(Some(entry))
+            }
+
+            Err(e) if e.is_not_found() => {
+                debug!("Transaction {} not in mempool", txid);
+                Ok(None)
+            }
+
+            Err(e) => {
+                error!("Error getmempoolentry for {}: {:?}", txid, e);
+                Err(e)
+            }
+        }
+    }
+
+    fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError> {
+        let txids = self.client.get_raw_mempool().map_err(|e| {
+            error!("Error get_raw_mempool: {:?}", e);
+            e
+        })?;
+
+        debug!("Raw mempool size: {}", txids.len());
+        Ok(txids)
+    }
+
+    fn check_in_mempool(&self, txid: &Txid) -> Result<bool, BitcoinClientError> {
+        // Uses getmempoolentry, and falls back to getrawmempool when the RPC endpoint does not support that method.
+        match self.get_mempool_entry(txid) {
+            Ok(entry) => Ok(entry.is_some()),
+            Err(e) => {
+                let err_str = e.to_string();
+
+                if err_str.contains("Unsupported method") || err_str.contains("-32600") {
+                    warn!(
+                    "RPC endpoint does not support getmempoolentry; falling back to getrawmempool"
+                );
+                    Ok(self.get_raw_mempool()?.contains(txid))
+                } else {
+                    error!("Failed to determine mempool status for {}: {:?}", txid, e);
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    // ================================
+    //  Wallet and mining
+    // ================================
 
     fn fund_address(
         &self,
@@ -466,12 +642,11 @@ impl BitcoinClientApi for BitcoinClient {
             return Err(BitcoinClientError::InvalidNetwork);
         }
 
-        let txid = self
-            .client
-            .send_to_address(address, amount, None, None, None, None, None, None)
-            .map_err(|e| BitcoinClientError::FailedToFundAddress {
+        let txid = self.client.send_to_address(address, amount).map_err(|e| {
+            BitcoinClientError::FailedToFundAddress {
                 error: e.to_string(),
-            })?;
+            }
+        })?;
 
         info!(
             "Funded address {:?} with {} sats (txid: {})",
@@ -482,18 +657,13 @@ impl BitcoinClientApi for BitcoinClient {
 
         self.mine_blocks_to_address(1, address)?;
 
-        let tx_info = self
-            .client
-            .get_transaction(&txid, Some(true))
-            .map_err(|e| BitcoinClientError::FailedToGetTransactionDetails {
-                error: e.to_string(),
-            })?;
-
-        let tx = tx_info.transaction().map_err(|e| {
+        let tx_info = self.client.get_transaction(&txid).map_err(|e| {
             BitcoinClientError::FailedToGetTransactionDetails {
                 error: e.to_string(),
             }
         })?;
+
+        let tx = tx_info.tx;
 
         let vout = tx_info
             .details
@@ -506,29 +676,8 @@ impl BitcoinClientApi for BitcoinClient {
         Ok((tx, vout))
     }
 
-    fn send_transaction(&self, tx: &Transaction) -> Result<Txid, BitcoinClientError> {
-        let serialized_tx = serialize_hex(&tx);
-
-        let result = self.client.send_raw_transaction(serialized_tx);
-
-        match &result {
-            Ok(txid) => info!("TX sent: {} (txid: {})", tx.compute_txid(), txid),
-            Err(e) => error!("Failed to send TX: {} - {:?}", tx.compute_txid(), e),
-        }
-
-        result.map_err(|e| BitcoinClientError::FailedToSendTransaction {
-            error: e.to_string(),
-        })
-    }
-
-    fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, BitcoinClientError> {
-        let tx = self.client.get_raw_transaction(txid, None).ok();
-        debug!("get_transaction({}) -> found: {}", txid, tx.is_some());
-        Ok(tx)
-    }
-
     fn mine_blocks(&self, block_num: u64) -> Result<(), BitcoinClientError> {
-        // send to an empty address to avoid changing the balance of a wallet
+        // Mines to an address no wallet owns, so no wallet balance changes.
         let address = Address::from_str("mkHS9ne12qx9pS9VojpwU5xtRd4T7X7ZUt")?
             .require_network(Network::Regtest)?;
 
@@ -590,10 +739,7 @@ impl BitcoinClientApi for BitcoinClient {
                 })?;
 
         if !wallets.contains(&wallet_name.to_string()) {
-            match self
-                .client
-                .create_wallet(wallet_name, None, None, None, None)
-            {
+            match self.client.create_wallet(wallet_name) {
                 Ok(r) => {
                     info!("Created wallet: {}", wallet_name);
                     r
@@ -611,7 +757,7 @@ impl BitcoinClientApi for BitcoinClient {
 
         let address = self
             .client
-            .get_new_address(None, None)
+            .get_new_address()
             .map_err(|e| BitcoinClientError::FailedToGetNewAddress {
                 error: e.to_string(),
             })?
@@ -633,10 +779,7 @@ impl BitcoinClientApi for BitcoinClient {
                 })?;
 
         if !wallets.contains(&wallet_name.to_string()) {
-            match self
-                .client
-                .create_wallet(wallet_name, None, None, None, None)
-            {
+            match self.client.create_wallet(wallet_name) {
                 Ok(_) => {
                     info!("Created wallet: {}", wallet_name);
                 }
@@ -654,96 +797,15 @@ impl BitcoinClientApi for BitcoinClient {
         Ok(())
     }
 
-    fn invalidate_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError> {
-        let blockchain_info = self.get_blockchain_info()?;
-
-        if blockchain_info.chain != Network::Regtest {
-            return Err(BitcoinClientError::InvalidNetwork);
-        }
-
-        self.client.invalidate_block(hash).map_err(|e| {
-            error!("Failed to invalidate block {}: {:?}", hash, e);
-            BitcoinClientError::FailedToInvalidateBlock {
-                error: e.to_string(),
-            }
-        })?;
-        info!("Invalidated block: {}", hash);
-        Ok(())
-    }
-
-    /// Returns the mempool entry for `txid` if the transaction is currently in the node's mempool.
-    ///
-    /// Returns:
-    /// - `Ok(Some(entry))` if the transaction is present in the mempool.
-    /// - `Ok(None)` if the transaction is not present in the mempool.
-    /// - `Err(...)` for transport, RPC, serialization, or other unexpected errors.
-    fn get_mempool_entry(
-        &self,
-        txid: &Txid,
-    ) -> Result<Option<GetMempoolEntryResult>, BitcoinClientError> {
-        let txid_str = txid.to_string();
-        let args = vec![serde_json::Value::String(txid_str)];
-
-        match self
-            .client
-            .call::<GetMempoolEntryResult>("getmempoolentry", &args)
-        {
-            Ok(entry) => {
-                debug!("getmempoolentry({}) -> height: {}", txid, entry.height);
-                Ok(Some(entry))
-            }
-
-            Err(ref e) if is_not_found(e) => {
-                debug!("Transaction {} not in mempool", txid);
-                Ok(None)
-            }
-
-            Err(e) => {
-                error!("Error getmempoolentry for {}: {:?}", txid, e);
-                Err(BitcoinClientError::RpcError(e))
-            }
-        }
-    }
-
-    /// Returns the list of transaction IDs currently in the node's mempool.
-    fn get_raw_mempool(&self) -> Result<Vec<Txid>, BitcoinClientError> {
-        let txids = self.client.get_raw_mempool().map_err(|e| {
-            error!("Error get_raw_mempool: {:?}", e);
-            BitcoinClientError::RpcError(e)
-        })?;
-
-        debug!("Raw mempool size: {}", txids.len());
-        Ok(txids)
-    }
-
-    /// Returns `true` if the transaction is currently in the mempool.
-    ///
-    /// Uses `getmempoolentry` as the primary mechanism. If the RPC endpoint does
-    /// not support that method, falls back to checking membership via `getrawmempool`.
-    fn check_in_mempool(&self, txid: &Txid) -> Result<bool, BitcoinClientError> {
-        match self.get_mempool_entry(txid) {
-            Ok(entry) => Ok(entry.is_some()),
-            Err(e) => {
-                let err_str = e.to_string();
-
-                if err_str.contains("Unsupported method") || err_str.contains("-32600") {
-                    warn!(
-                    "RPC endpoint does not support getmempoolentry; falling back to getrawmempool"
-                );
-                    Ok(self.get_raw_mempool()?.contains(txid))
-                } else {
-                    error!("Failed to determine mempool status for {}: {:?}", txid, e);
-                    Err(e)
-                }
-            }
-        }
-    }
+    // ================================
+    //  Testing
+    // ================================
 
     #[cfg(feature = "testing")]
     fn get_block_count(&self) -> Result<u64, BitcoinClientError> {
         let count = self.client.get_block_count().map_err(|e| {
             error!("Error get_block_count: {:?}", e);
-            BitcoinClientError::RpcError(e)
+            e
         })?;
         debug!("Block count: {}", count);
         Ok(count)
@@ -751,9 +813,9 @@ impl BitcoinClientApi for BitcoinClient {
 
     #[cfg(feature = "testing")]
     fn get_balance(&self) -> Result<Amount, BitcoinClientError> {
-        let balance = self.client.get_balance(None, None).map_err(|e| {
+        let balance = self.client.get_balance().map_err(|e| {
             error!("Error get_balance: {:?}", e);
-            BitcoinClientError::RpcError(e)
+            e
         })?;
         debug!("Wallet balance: {} BTC", balance.to_btc());
         Ok(balance)
@@ -763,7 +825,7 @@ impl BitcoinClientApi for BitcoinClient {
     fn list_wallets(&self) -> Result<Vec<String>, BitcoinClientError> {
         let wallets = self.client.list_wallets().map_err(|e| {
             error!("Error list_wallets: {:?}", e);
-            BitcoinClientError::RpcError(e)
+            e
         })?;
         debug!("Wallets: {:?}", wallets);
         Ok(wallets)
@@ -773,9 +835,9 @@ impl BitcoinClientApi for BitcoinClient {
     fn dump_privkey(&self, address: &Address) -> Result<String, BitcoinClientError> {
         let wif = self.client.dump_private_key(address).map_err(|e| {
             error!("Error dump_privkey: {:?}", e);
-            BitcoinClientError::RpcError(e)
+            e
         })?;
-        debug!("Dump privkey for {:?}: {}", address, wif);
+        debug!("Dumped private key for {:?}", address);
         Ok(wif.to_string())
     }
 
@@ -790,43 +852,18 @@ impl BitcoinClientApi for BitcoinClient {
         address: &Address,
         txs: &[Transaction],
     ) -> Result<BlockHash, BitcoinClientError> {
-        let raw_hexes: Vec<serde_json::Value> = txs
-            .iter()
-            .map(|tx| serde_json::Value::String(serialize_hex(tx)))
-            .collect();
-        let result: serde_json::Value = self
-            .client
-            .call(
-                "generateblock",
-                &[
-                    serde_json::Value::String(address.to_string()),
-                    serde_json::Value::Array(raw_hexes),
-                ],
-            )
-            .map_err(|e| BitcoinClientError::FailedToMineBlocks {
-                error: e.to_string(),
-            })?;
-        let hash_str = result.get("hash").and_then(|h| h.as_str()).ok_or_else(|| {
+        let hash = self.client.generate_block(address, txs).map_err(|e| {
             BitcoinClientError::FailedToMineBlocks {
-                error: format!("generateblock returned no hash: {:?}", result),
+                error: e.to_string(),
             }
         })?;
-        let hash =
-            BlockHash::from_str(hash_str).map_err(|e| BitcoinClientError::FailedToMineBlocks {
-                error: format!("parse block hash failed: {:?}", e),
-            })?;
         debug!("Generated block {} with {} tx(s)", hash, txs.len());
         Ok(hash)
     }
 
     #[cfg(feature = "testing")]
     fn set_mock_time(&self, timestamp: i64) -> Result<(), BitcoinClientError> {
-        self.client
-            .call::<serde_json::Value>(
-                "setmocktime",
-                &[serde_json::Value::Number(timestamp.into())],
-            )
-            .map_err(BitcoinClientError::RpcError)?;
+        self.client.set_mock_time(timestamp)?;
         debug!("Set mock time to {}", timestamp);
         Ok(())
     }
@@ -837,261 +874,204 @@ impl BitcoinClientApi for BitcoinClient {
         address: &Address,
         amount: Amount,
     ) -> Result<Txid, BitcoinClientError> {
-        let result: serde_json::Value = self
-            .client
-            .call(
-                "sendtoaddress",
-                &[
-                    serde_json::Value::String(address.to_string()),
-                    serde_json::Value::String(format!("{}", amount.to_btc())),
-                ],
-            )
-            .map_err(BitcoinClientError::RpcError)?;
-        let txid_str =
-            result
-                .as_str()
-                .ok_or_else(|| BitcoinClientError::FailedToSendTransaction {
-                    error: format!("sendtoaddress returned no txid: {:?}", result),
-                })?;
-        let txid =
-            Txid::from_str(txid_str).map_err(|e| BitcoinClientError::FailedToSendTransaction {
-                error: format!("parse txid failed: {:?}", e),
-            })?;
+        let txid = self.client.send_to_address(address, amount)?;
         debug!("Sent {} to {} -> {}", amount, address, txid);
         Ok(txid)
     }
-}
 
-/// Error code Bitcoin Core returns when the requested transaction is not in the mempool or the transaction index
-const RPC_NOT_FOUND: i32 = -5;
+    #[cfg(feature = "testing")]
+    fn reconsider_block(&self, hash: &BlockHash) -> Result<(), BitcoinClientError> {
+        self.client.reconsider_block(hash)
+    }
 
-/// True when the node answered that the requested transaction does not exist, as opposed to failing to answer.
-fn is_not_found(error: &bitcoincore_rpc::Error) -> bool {
-    matches!(
-        error,
-        bitcoincore_rpc::Error::JsonRpc(jsonrpc::error::Error::Rpc(rpc_error))
-            if rpc_error.code == RPC_NOT_FOUND
-    )
-}
+    #[cfg(feature = "testing")]
+    fn lock_unspent(&self, outpoint: &bitcoin::OutPoint) -> Result<(), BitcoinClientError> {
+        self.client
+            .lock_unspent(false, std::slice::from_ref(outpoint))?;
+        Ok(())
+    }
 
-/// Masks potential secrets in URLs by replacing high-entropy strings with asterisks
-fn mask_url_secrets(url: &str) -> String {
-    let mut masked_url = url.to_string();
+    #[cfg(feature = "testing")]
+    fn unlock_unspent_all(&self) -> Result<(), BitcoinClientError> {
+        self.client.lock_unspent(true, &[])?;
+        Ok(())
+    }
 
-    // Split the URL into parts to avoid masking legitimate parts like hostnames
-    let parts: Vec<&str> = url.split(&['/', '?', '&', '=', ':', '@'][..]).collect();
+    #[cfg(feature = "testing")]
+    fn get_wallet_address(&self) -> Result<Address, BitcoinClientError> {
+        let network = self.client.get_blockchain_info()?.chain;
+        let address = self.client.get_new_address()?.require_network(network)?;
+        Ok(address)
+    }
 
-    for part in parts {
-        // Check if this part looks like a secret (high entropy string)
-        if is_potential_secret(part) {
-            // Replace the secret with asterisks of the same length
-            let asterisks = "*".repeat(part.len());
-            masked_url = masked_url.replace(part, &asterisks);
+    #[cfg(feature = "testing")]
+    fn get_best_block_hash(&self) -> Result<BlockHash, BitcoinClientError> {
+        self.client.get_best_block_hash()
+    }
+
+    #[cfg(feature = "testing")]
+    fn prioritise_transaction(
+        &self,
+        txid: &Txid,
+        fee_delta_sats: i64,
+    ) -> Result<(), BitcoinClientError> {
+        self.client.prioritise_transaction(txid, fee_delta_sats)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    fn sign_spend(
+        &self,
+        inputs: &[bitcoin::OutPoint],
+        outputs: &std::collections::HashMap<String, Amount>,
+        prevouts: &[(bitcoin::OutPoint, bitcoin::TxOut)],
+    ) -> Result<Transaction, BitcoinClientError> {
+        let unsigned = self.client.create_raw_transaction(inputs, outputs)?;
+        let signed = self
+            .client
+            .sign_raw_transaction_with_wallet(&unsigned, prevouts)?;
+        if !signed.complete {
+            return Err(BitcoinClientError::FailedToSendTransaction {
+                error: format!("signing incomplete: {:?}", signed.errors),
+            });
         }
+        Ok(signed.tx)
     }
-
-    masked_url
-}
-
-/// Determines if a string might be a secret based on entropy characteristics
-fn is_potential_secret(s: &str) -> bool {
-    // Skip very short strings and common words
-    if s.len() < 16 {
-        return false;
-    }
-
-    // Skip common URL components
-    if matches!(
-        s.to_lowercase().as_str(),
-        "http" | "https" | "localhost" | "127.0.0.1" | "wallet" | "bitcoin" | "rpc" | "api"
-    ) {
-        return false;
-    }
-
-    // Check for hexadecimal patterns (common in secrets/tokens)
-    let hex_chars = s.chars().filter(|c| c.is_ascii_hexdigit()).count();
-    let total_chars = s.len();
-
-    // If more than 80% of characters are hex and string is long enough, likely a secret
-    if hex_chars as f64 / total_chars as f64 > 0.8 && total_chars >= 16 {
-        return true;
-    }
-
-    // Check for base64-like patterns (alphanumeric with some special chars)
-    let alphanum_chars = s.chars().filter(|c| c.is_alphanumeric()).count();
-    if alphanum_chars as f64 / total_chars as f64 > 0.9 && total_chars >= 20 {
-        return true;
-    }
-
-    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
-    #[test]
-    fn test_mask_url_secrets() {
-        // Test URL with hex secret
-        let url_with_secret = "http://user:7822107bcd2054574934586c276a46f0d3eca5e2@localhost:8332";
-        let masked = mask_url_secrets(url_with_secret);
-        assert!(masked.contains("****************************************"));
-        assert!(!masked.contains("7822107bcd2054574934586c276a46f0d3eca5e2"));
-
-        // Test normal URL without secrets
-        let normal_url = "http://localhost:8332/wallet/test";
-        let masked_normal = mask_url_secrets(normal_url);
-        assert_eq!(masked_normal, normal_url);
-
-        // Test URL with query parameter secret
-        let url_with_query_secret =
-            "http://localhost:8332?token=abc123def456789012345678901234567890abcd";
-        let masked_query = mask_url_secrets(url_with_query_secret);
-        assert!(!masked_query.contains("abc123def456789012345678901234567890abcd"));
-        assert!(masked_query.contains("*"));
-    }
-
-    #[test]
-    fn test_is_potential_secret() {
-        // Test hex secret (like the example in the prompt)
-        assert!(is_potential_secret(
-            "7822107bcd2054574934586c276a46f0d3eca5e2"
-        ));
-
-        // Test base64-like secret
-        assert!(is_potential_secret(
-            "YWJjMTIzZGVmNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkw"
-        ));
-
-        // Test normal words/components
-        assert!(!is_potential_secret("localhost"));
-        assert!(!is_potential_secret("bitcoin"));
-        assert!(!is_potential_secret("wallet"));
-        assert!(!is_potential_secret("8332"));
-        assert!(!is_potential_secret("test"));
-
-        // Test short strings
-        assert!(!is_potential_secret("abc123"));
-    }
-
-    // Only the node's "not found" answer is not found. Any other RPC error, or a failure to reach the node, is not.
-    #[test]
-    fn test_is_not_found() {
-        let rpc_error = |code| {
-            bitcoincore_rpc::Error::JsonRpc(jsonrpc::error::Error::Rpc(jsonrpc::error::RpcError {
-                code,
-                message: "error".to_string(),
-                data: None,
-            }))
-        };
-
-        assert!(is_not_found(&rpc_error(RPC_NOT_FOUND)));
-        // Invalid parameter, and the node still warming up.
-        assert!(!is_not_found(&rpc_error(-8)));
-        assert!(!is_not_found(&rpc_error(-28)));
-
-        let unreachable = bitcoincore_rpc::Error::JsonRpc(jsonrpc::error::Error::Transport(
-            Box::new(std::io::Error::other("connection refused")),
-        ));
-        assert!(!is_not_found(&unreachable));
-    }
-
-    // A node that cannot be reached is an error, not a tx the node does not know.
-    #[test]
-    fn test_get_tx_confirmations_unreachable_node() {
-        // Bind to a free port and release it, so nothing is listening there and the connection is refused.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let bitcoin_client = BitcoinClient::new(
-            &Secret::new(format!("http://127.0.0.1:{port}")),
-            &Secret::new("foo".to_string()),
-            &Secret::new("rpcpassword".to_string()),
+    /// A client on port 0, which never accepts connections, so every call to the node fails.
+    fn offline_client() -> BitcoinClient {
+        let empty = Secret::new(String::new());
+        BitcoinClient::new(
+            &Secret::new("http://127.0.0.1:0".to_string()),
+            &empty,
+            &empty,
         )
-        .unwrap();
+        .unwrap()
+    }
 
-        let tx_id = Txid::from_str(&"11".repeat(32)).unwrap();
-        let result = bitcoin_client.get_tx_confirmations(&tx_id);
-        assert!(
-            matches!(result, Err(BitcoinClientError::RpcError(_))),
-            "expected an RPC error, got {result:?}"
+    // A node that cannot be reached is an error, never a "not found" answer such as None or false. The exceptions are
+    // tx_exists and get_transaction, whose contract is to answer false and None whenever the node cannot return the tx.
+    #[test]
+    fn unreachable_node_is_an_error() {
+        let client = offline_client();
+        let txid = Txid::from_str(&"11".repeat(32)).unwrap();
+        let hash = BlockHash::from_str(&"22".repeat(32)).unwrap();
+        let address = Address::from_str("mkHS9ne12qx9pS9VojpwU5xtRd4T7X7ZUt")
+            .unwrap()
+            .assume_checked();
+        let outpoint = bitcoin::OutPoint::new(txid, 0);
+
+        assert!(client
+            .get_tx_confirmations(&txid)
+            .unwrap_err()
+            .is_node_unreachable());
+        assert!(client.get_raw_transaction_info(&txid).is_err());
+        assert!(client.get_mempool_entry(&txid).is_err());
+        assert!(client.check_in_mempool(&txid).is_err());
+        assert!(!client.tx_exists(&txid));
+        assert!(client.get_transaction(&txid).unwrap().is_none());
+
+        assert!(client.get_tip_height().is_err());
+        assert!(client.get_block_by_height(&1).is_err());
+        assert!(client.get_block_header_info(&hash).is_err());
+        assert!(client.is_txindex_enabled().is_err());
+        assert!(client.invalidate_block(&hash).is_err());
+        assert!(client.get_raw_transaction_verbosity_two(&txid).is_err());
+        assert!(client.get_tx_out(&txid, 0).is_err());
+        assert!(client.is_utxo_spent(&txid, 0, true).is_err());
+        assert!(matches!(
+            client.send_transaction(&bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![],
+                output: vec![],
+            }),
+            Err(BitcoinClientError::FailedToSendTransaction { .. })
+        ));
+        assert!(client.estimate_smart_fee().is_err());
+        assert!(client.get_raw_mempool().is_err());
+        assert!(client.fund_address(&address, Amount::ONE_SAT).is_err());
+        assert!(client.mine_blocks(1).is_err());
+        assert!(client.init_wallet("test_wallet").is_err());
+        assert!(matches!(
+            client.create_wallet_only("test_wallet"),
+            Err(BitcoinClientError::FailedToListWallets { .. })
+        ));
+
+        assert!(client.get_block_count().is_err());
+        assert!(client.get_balance().is_err());
+        assert!(client.list_wallets().is_err());
+        assert!(client.dump_privkey(&address).is_err());
+        assert!(client.mine_empty_block(&address).is_err());
+        assert!(client.set_mock_time(0).is_err());
+        assert!(client.send_to_address(&address, Amount::ONE_SAT).is_err());
+        assert!(client.reconsider_block(&hash).is_err());
+        assert!(client.lock_unspent(&outpoint).is_err());
+        assert!(client.unlock_unspent_all().is_err());
+        assert!(client.get_wallet_address().is_err());
+        assert!(client.get_best_block_hash().is_err());
+        assert!(client.prioritise_transaction(&txid, 1).is_err());
+        assert!(client
+            .sign_spend(&[outpoint], &Default::default(), &[])
+            .is_err());
+    }
+
+    // The wallet goes into the URL path, with no "//" after a trailing slash and any query kept at the end. Only letters,
+    // digits, '_' and '-' are accepted in the name, an empty name means no wallet, and a URL that does not parse fails.
+    #[test]
+    fn new_with_wallet_builds_the_wallet_url() {
+        for (url, expected) in [
+            ("http://host:8332", "http://host:8332/wallet/w-1"),
+            ("http://host:8332/", "http://host:8332/wallet/w-1"),
+            (
+                "https://host/v2/path?x=y",
+                "https://host/v2/path/wallet/w-1?x=y",
+            ),
+        ] {
+            assert_eq!(wallet_url(url, "w-1").unwrap(), expected);
+        }
+        assert_eq!(
+            wallet_url("http://host:8332", "").unwrap(),
+            "http://host:8332"
         );
+        assert!(matches!(
+            wallet_url("http://host:8332", "../other"),
+            Err(BitcoinClientError::InvalidWalletName { .. })
+        ));
+        assert!(matches!(
+            wallet_url("not a url", "w"),
+            Err(BitcoinClientError::InvalidUrl)
+        ));
+
+        let url = Secret::new("http://127.0.0.1:0".to_string());
+        let empty = Secret::new(String::new());
+        assert!(BitcoinClient::new_with_wallet(&url, &empty, &empty, "test_wallet-1").is_ok());
     }
 
+    // The address is the P2WPKH of the key, computed locally. P2WPKH needs a compressed key, so an uncompressed one fails.
     #[test]
-    #[ignore]
-    fn mine_blocks_to_address_test() {
-        let bitcoin_client = BitcoinClient::new(
-            &Secret::new("http://127.0.0.1:18443".to_string()),
-            &Secret::new("foo".to_string()),
-            &Secret::new("rpcpassword".to_string()),
-        )
-        .unwrap();
+    fn get_new_address_is_p2wpkh() {
+        let secret = SecretKey::from_slice(&[0x42; 32]).unwrap();
+        let pk = PublicKey::new(secret.public_key(&Secp256k1::new()));
+        let expected = Address::p2wpkh(
+            &CompressedPublicKey::try_from(pk).unwrap(),
+            Network::Regtest,
+        );
 
-        let blocks = bitcoin_client.get_tip_height().unwrap();
-        println!("Blocks: {:?}", blocks);
-        let wallet = bitcoin_client.init_wallet("test_wallet").unwrap();
-        bitcoin_client.mine_blocks_to_address(1, &wallet).unwrap();
-
-        let blocks = bitcoin_client.get_tip_height().unwrap();
-        println!("Blocks: {:?}", blocks);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_init_wallet() -> Result<(), BitcoinClientError> {
-        let bitcoin_client = BitcoinClient::new(
-            &Secret::new("http://127.0.0.1:18443".to_string()),
-            &Secret::new("foo".to_string()),
-            &Secret::new("rpcpassword".to_string()),
-        )
-        .unwrap();
-
-        // Use a unique wallet name to avoid collisions
-        let wallet_name = format!("test_wallet");
-
-        // Attempt to initialize the wallet
-        let result_address = bitcoin_client.init_wallet(&wallet_name);
-
-        println!("Result address: {:?}", result_address);
-        assert!(result_address.is_ok());
-        let address = result_address.unwrap();
-        println!("Address: {:?}", address);
-
-        // Attempt to initialize the wallet
-        let result_address_2 = bitcoin_client.init_wallet(&wallet_name);
-
-        assert!(result_address_2.is_ok());
-        let address_2 = result_address_2.unwrap();
-        assert_ne!(address, address_2);
-        println!("Address 2: {:?}", address_2);
-
-        // Init wallet with different name
-        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
-
-        println!("Result address 3: {:?}", result_address_3);
-        assert!(result_address_3.is_ok());
-        let address_3 = result_address_3.unwrap();
-        println!("Address 3: {:?}", address_3);
-
-        // Init wallet with different name
-        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
-
-        println!("Result address 3: {:?}", result_address_3);
-        assert!(result_address_3.is_ok());
-        let address_3 = result_address_3.unwrap();
-        println!("Address 3: {:?}", address_3);
-
-        // Init wallet with different name
-        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
-
-        println!("Result address 3: {:?}", result_address_3);
-        assert!(result_address_3.is_ok());
-        let address_3 = result_address_3.unwrap();
-        println!("Address 3: {:?}", address_3);
-
-        Ok(())
+        let client = offline_client();
+        assert_eq!(
+            client.get_new_address(pk, Network::Regtest).unwrap(),
+            expected
+        );
+        assert!(matches!(
+            client.get_new_address(PublicKey::new_uncompressed(pk.inner), Network::Regtest),
+            Err(BitcoinClientError::FailedToConvertPublicKey { .. })
+        ));
     }
 }
