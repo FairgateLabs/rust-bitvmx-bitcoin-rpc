@@ -1021,10 +1021,10 @@ mod tests {
         .unwrap();
 
         // Use a unique wallet name to avoid collisions
-        let wallet_name = format!("test_wallet");
+        let wallet_name = "test_wallet";
 
         // Attempt to initialize the wallet
-        let result_address = bitcoin_client.init_wallet(&wallet_name);
+        let result_address = bitcoin_client.init_wallet(wallet_name);
 
         println!("Result address: {:?}", result_address);
         assert!(result_address.is_ok());
@@ -1032,7 +1032,7 @@ mod tests {
         println!("Address: {:?}", address);
 
         // Attempt to initialize the wallet
-        let result_address_2 = bitcoin_client.init_wallet(&wallet_name);
+        let result_address_2 = bitcoin_client.init_wallet(wallet_name);
 
         assert!(result_address_2.is_ok());
         let address_2 = result_address_2.unwrap();
@@ -1040,7 +1040,7 @@ mod tests {
         println!("Address 2: {:?}", address_2);
 
         // Init wallet with different name
-        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
+        let result_address_3 = bitcoin_client.init_wallet("test_wallet_2");
 
         println!("Result address 3: {:?}", result_address_3);
         assert!(result_address_3.is_ok());
@@ -1048,7 +1048,7 @@ mod tests {
         println!("Address 3: {:?}", address_3);
 
         // Init wallet with different name
-        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
+        let result_address_3 = bitcoin_client.init_wallet("test_wallet_2");
 
         println!("Result address 3: {:?}", result_address_3);
         assert!(result_address_3.is_ok());
@@ -1056,7 +1056,7 @@ mod tests {
         println!("Address 3: {:?}", address_3);
 
         // Init wallet with different name
-        let result_address_3 = bitcoin_client.init_wallet(&format!("test_wallet_2"));
+        let result_address_3 = bitcoin_client.init_wallet("test_wallet_2");
 
         println!("Result address 3: {:?}", result_address_3);
         assert!(result_address_3.is_ok());

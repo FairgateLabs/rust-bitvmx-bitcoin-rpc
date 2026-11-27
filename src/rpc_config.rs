@@ -74,11 +74,7 @@ fn is_potential_secret(s: &str) -> bool {
 
     // Check for base64-like patterns (alphanumeric with some special chars)
     let alphanum_chars = s.chars().filter(|c| c.is_alphanumeric()).count();
-    if alphanum_chars as f64 / total_chars as f64 > 0.9 && total_chars >= 20 {
-        return true;
-    }
-
-    false
+    alphanum_chars as f64 / total_chars as f64 > 0.9 && total_chars >= 20
 }
 
 #[cfg(test)]
