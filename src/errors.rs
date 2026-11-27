@@ -61,6 +61,10 @@ pub enum BitcoinClientError {
     #[error("Invalid wallet name: {wallet_name}")]
     InvalidWalletName { wallet_name: String },
 
+    /// The node URL could not be parsed. The URL is not included because it can carry an API key.
+    #[error("Invalid node URL")]
+    InvalidUrl,
+
     #[error("Failed to convert PublicKey to CompressedPublicKey: {error}")]
     FailedToConvertPublicKey { error: String },
 }

@@ -12,6 +12,7 @@ use corepc_types::model::{
 };
 use mockall::automock;
 use redact::Secret;
+use reqwest::Url;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
@@ -59,23 +60,35 @@ impl BitcoinClient {
         pass: &Secret<String>,
         wallet_name: &str,
     ) -> Result<Self, BitcoinClientError> {
-        let url = if !wallet_name.is_empty() {
-            if !wallet_name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                return Err(BitcoinClientError::InvalidWalletName {
-                    wallet_name: wallet_name.to_string(),
-                });
-            }
-
-            format!("{}/wallet/{}", url.expose_secret(), wallet_name)
-        } else {
-            url.expose_secret().to_string()
-        };
-
+        let url = wallet_url(url.expose_secret(), wallet_name)?;
         Self::new(&Secret::new(url), user, pass)
     }
+}
+
+/// URL of the wallet `wallet_name` on the node at `url`: `/wallet/<name>` is added to the path, keeping any query at the
+/// end. An empty name returns `url` unchanged.
+fn wallet_url(url: &str, wallet_name: &str) -> Result<String, BitcoinClientError> {
+    if wallet_name.is_empty() {
+        return Ok(url.to_string());
+    }
+    if !wallet_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(BitcoinClientError::InvalidWalletName {
+            wallet_name: wallet_name.to_string(),
+        });
+    }
+
+    let mut parsed = Url::parse(url).map_err(|_| BitcoinClientError::InvalidUrl)?;
+    parsed
+        .path_segments_mut()
+        .map_err(|_| BitcoinClientError::InvalidUrl)?
+        // A trailing "/" leaves an empty last segment, which is dropped so the path does not get "//".
+        .pop_if_empty()
+        .push("wallet")
+        .push(wallet_name);
+    Ok(parsed.to_string())
 }
 
 #[automock]
@@ -822,7 +835,7 @@ impl BitcoinClientApi for BitcoinClient {
             error!("Error dump_privkey: {:?}", e);
             e
         })?;
-        debug!("Dump privkey for {:?}: {}", address, wif);
+        debug!("Dumped private key for {:?}", address);
         Ok(wif.to_string())
     }
 
@@ -1007,17 +1020,36 @@ mod tests {
             .is_err());
     }
 
-    // A wallet name goes into the URL path, so only letters, digits, '_' and '-' are accepted. An empty name means no wallet.
+    // The wallet goes into the URL path, with no "//" after a trailing slash and any query kept at the end. Only letters,
+    // digits, '_' and '-' are accepted in the name, an empty name means no wallet, and a URL that does not parse fails.
     #[test]
-    fn new_with_wallet_validates_the_name() {
+    fn new_with_wallet_builds_the_wallet_url() {
+        for (url, expected) in [
+            ("http://host:8332", "http://host:8332/wallet/w-1"),
+            ("http://host:8332/", "http://host:8332/wallet/w-1"),
+            (
+                "https://host/v2/path?x=y",
+                "https://host/v2/path/wallet/w-1?x=y",
+            ),
+        ] {
+            assert_eq!(wallet_url(url, "w-1").unwrap(), expected);
+        }
+        assert_eq!(
+            wallet_url("http://host:8332", "").unwrap(),
+            "http://host:8332"
+        );
+        assert!(matches!(
+            wallet_url("http://host:8332", "../other"),
+            Err(BitcoinClientError::InvalidWalletName { .. })
+        ));
+        assert!(matches!(
+            wallet_url("not a url", "w"),
+            Err(BitcoinClientError::InvalidUrl)
+        ));
+
         let url = Secret::new("http://127.0.0.1:0".to_string());
         let empty = Secret::new(String::new());
         assert!(BitcoinClient::new_with_wallet(&url, &empty, &empty, "test_wallet-1").is_ok());
-        assert!(BitcoinClient::new_with_wallet(&url, &empty, &empty, "").is_ok());
-        assert!(matches!(
-            BitcoinClient::new_with_wallet(&url, &empty, &empty, "../other"),
-            Err(BitcoinClientError::InvalidWalletName { .. })
-        ));
     }
 
     // The address is the P2WPKH of the key, computed locally. P2WPKH needs a compressed key, so an uncompressed one fails.
