@@ -101,10 +101,12 @@ mod tests {
     #[test]
     fn test_mask_url_secrets() {
         // Test URL with hex secret
-        let url_with_secret = "http://user:7822107bcd2054574934586c276a46f0d3eca5e2@localhost:8332";
-        let masked = mask_url_secrets(url_with_secret);
-        assert!(masked.contains("****************************************"));
-        assert!(!masked.contains("7822107bcd2054574934586c276a46f0d3eca5e2"));
+        let hex_secret = "ab".repeat(20);
+        let masked = mask_url_secrets(&format!("http://user:{hex_secret}@localhost:8332"));
+        assert_eq!(
+            masked,
+            format!("http://user:{}@localhost:8332", "*".repeat(40))
+        );
 
         // Test normal URL without secrets
         let normal_url = "http://localhost:8332/wallet/test";
@@ -112,24 +114,19 @@ mod tests {
         assert_eq!(masked_normal, normal_url);
 
         // Test URL with query parameter secret
-        let url_with_query_secret =
-            "http://localhost:8332?token=abc123def456789012345678901234567890abcd";
-        let masked_query = mask_url_secrets(url_with_query_secret);
-        assert!(!masked_query.contains("abc123def456789012345678901234567890abcd"));
+        let query_secret = "a1".repeat(20);
+        let masked_query = mask_url_secrets(&format!("http://localhost:8332?token={query_secret}"));
+        assert!(!masked_query.contains(&query_secret));
         assert!(masked_query.contains("*"));
     }
 
     #[test]
     fn test_is_potential_secret() {
-        // Test hex secret (like the example in the prompt)
-        assert!(is_potential_secret(
-            "7822107bcd2054574934586c276a46f0d3eca5e2"
-        ));
+        // Test hex secret
+        assert!(is_potential_secret(&"ab".repeat(20)));
 
-        // Test base64-like secret
-        assert!(is_potential_secret(
-            "YWJjMTIzZGVmNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkw"
-        ));
+        // Test base64-like secret, mostly letters that are not hex
+        assert!(is_potential_secret(&"xyZ9".repeat(8)));
 
         // Test normal words/components
         assert!(!is_potential_secret("localhost"));

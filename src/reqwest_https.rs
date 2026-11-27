@@ -10,6 +10,8 @@ use std::{error, fmt};
 
 use reqwest::blocking::Client;
 
+use crate::rpc_config::mask_url_secrets;
+
 const DEFAULT_URL: &str = "http://localhost";
 const DEFAULT_PORT: u16 = 8332; // The default RPC port for bitcoind.
 const DEFAULT_TIMEOUT_SECONDS: u64 = 15;
@@ -112,7 +114,7 @@ impl jsonrpc::Transport for ReqwestHttpsTransport {
     }
 
     fn fmt_target(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.url)
+        write!(f, "{}", mask_url_secrets(&self.url))
     }
 }
 
@@ -133,7 +135,7 @@ impl jsonrpc_v18::Transport for ReqwestHttpsTransport {
     }
 
     fn fmt_target(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.url)
+        write!(f, "{}", mask_url_secrets(&self.url))
     }
 }
 
@@ -246,7 +248,8 @@ impl From<serde_json::Error> for Error {
 
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Self {
-        Error::Reqwest(e)
+        // A reqwest error prints the URL it failed on, which can carry an API key, so the URL is dropped.
+        Error::Reqwest(e.without_url())
     }
 }
 
@@ -307,6 +310,29 @@ mod tests {
             .header("x-api-key".into(), "secret-header".into())
             .build();
         assert!(!format!("{transport:?}").contains("secret"));
+    }
+
+    // A failed request and the jsonrpc clients' debug output do not show the API key in the URL.
+    #[test]
+    fn errors_and_targets_hide_the_api_key() {
+        // A long hex string, which is what the URL masking treats as a secret.
+        let key = "ab".repeat(20);
+        let transport = ReqwestHttpsTransport::builder()
+            .url(&format!("http://127.0.0.1:0/v2/{key}"))
+            .unwrap()
+            .build();
+        let v21 = jsonrpc::Client::with_transport(transport.clone());
+        let v18 = jsonrpc_v18::Client::with_transport(transport);
+
+        let v21_error = v21.call::<u64>("getblockcount", None).unwrap_err();
+        let v18_error = v18.call::<u64>("getblockcount", None).unwrap_err();
+        for text in [
+            format!("{v21_error} {v21_error:?}"),
+            format!("{v18_error} {v18_error:?}"),
+            format!("{v21:?} {v18:?}"),
+        ] {
+            assert!(!text.contains(&key), "leaked in {text}");
+        }
     }
 
     // An HTTP error without an RPC body shows its status and body, and keeps itself as the source.

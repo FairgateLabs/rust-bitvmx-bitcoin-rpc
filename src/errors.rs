@@ -106,9 +106,9 @@ mod tests {
 
     /// A failure to reach the node.
     fn unreachable() -> BitcoinClientError {
-        BitcoinClientError::RpcError(jsonrpc::Error::Transport(Box::new(
-            std::io::Error::other("connection refused"),
-        )))
+        BitcoinClientError::RpcError(jsonrpc::Error::Transport(Box::new(std::io::Error::other(
+            "connection refused",
+        ))))
     }
 
     // Only the node's "not found" answer (-5) is not found, and only a failure to reach the node is unreachable. Other
